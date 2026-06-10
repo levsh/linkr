@@ -35,4 +35,4 @@ __all__ = [
 ]
 
 
-__version__ = importlib.metadata.version("rmqaio")
+__version__ = importlib.metadata.version("linkr")
