@@ -48,16 +48,19 @@ await app.close()
 import logging
 
 from linkr import AppMiddleware
+from linkr.models import RpcRequest, RpcResponse
 
 
 class LoggingMiddleware(AppMiddleware):
-    async def dispatch(self, ctx, call_next):
-        if ctx.direction == "request" and ctx.role == "server":
-            logging.info("[%s] Calling", ctx.request.id)
-        result = await call_next(ctx)
-        if ctx.direction == "response" and ctx.role == "server" and ctx.response:
-            logging.info("[%s] Done", ctx.request.id)
-        return result
+    async def process_request(self, request: RpcRequest) -> RpcRequest:
+        if request.data:
+            logging.info("[%s] Calling %s", request.id, request.data.get("method"))
+        return request
+
+    async def process_response(self, request: RpcRequest, response: RpcResponse) -> RpcResponse:
+        if response.data:
+            logging.info("[%s] Done", request.id)
+        return response
 
 
 app.add_middleware(LoggingMiddleware())
@@ -73,54 +76,104 @@ from linkr import GzipMiddleware
 app.add_middleware(GzipMiddleware())
 ```
 
-Custom wire-level middleware inherits from `WireMiddleware` and works with `ctx.body`:
+Custom wire-level middleware inherits from `WireMiddleware` and works with raw bytes and wire headers:
 
 ```python
 import gzip
+
 from linkr import WireMiddleware
-from linkr.models import RpcContext
+from linkr.models import RpcRequest, RpcResponse
 
 
 class CustomCompression(WireMiddleware):
-    async def dispatch(self, ctx: RpcContext, call_next):
-        if ctx.direction == "request" and ctx.role == "client":
-            ctx.body = gzip.compress(ctx.body)
-        elif ctx.direction == "request" and ctx.role == "server":
-            ctx.body = gzip.decompress(ctx.body)
+    async def send(
+        self,
+        data: bytes,
+        headers: dict[str, str],
+        request: RpcRequest,
+        response: RpcResponse | None = None,
+    ) -> tuple[bytes, dict[str, str]]:
+        if len(data) >= 1024:
+            data = gzip.compress(data)
+            existing = headers.get("content_encoding", "")
+            headers["content_encoding"] = f"{existing},gzip" if existing else "gzip"
+        return data, headers
 
-        ctx = await call_next(ctx)
-
-        if ctx.direction == "response" and ctx.role == "server":
-            ctx.body = gzip.compress(ctx.body)
-        elif ctx.direction == "response" and ctx.role == "client":
-            ctx.body = gzip.decompress(ctx.body)
-
-        return ctx
+    async def receive(
+        self,
+        data: bytes,
+        headers: dict[str, str],
+        request: RpcRequest,
+    ) -> tuple[bytes, dict[str, str]]:
+        if "gzip" in headers.get("content_encoding", ""):
+            data = gzip.decompress(data)
+        return data, headers
 ```
 
 ## Dependency Injection
 
 ```python
-from linkr import Depends
+from linkr import Depends, MockTransport, RpcApp
 
 
 class Database:
     ...
 
 
-app.dependencies.add_singleton(Database, lambda: Database("postgres://..."))
+transport = MockTransport()
+async with RpcApp(transport) as app:
+    app.dependencies.add_singleton(Database, lambda: Database("postgres://..."))
 
-@app.method("ping")
-def ping(db: Depends[Database]) -> str:
-    return db.url
+    @app.method("ping")
+    def ping(db: Depends[Database]) -> str:
+        return db.url
+
+    await app.consume()
+    result = await app.make("ping").call()
+    print(result)  # postgres://...
+```
+
+## Error Handling
+
+Type validation is enabled via ``validate_types=True``:
+
+```python
+from linkr import MockTransport, RpcApp, RpcError
+
+transport = MockTransport()
+async with RpcApp(transport) as app:
+    @app.method("add", validate_types=True)
+    def add(x: int, y: int) -> int:
+        return x + y
+
+    await app.consume()
+    try:
+        await app.make("add", x="not", y=3).call()
+    except RpcError as e:
+        print(e.error_code)     # ValidationError
+        print(e.error_message)  # x: Input should be a valid integer
+```
+
+## Publish (Fire-and-Forget)
+
+Send a message without waiting for a response:
+
+```python
+from linkr import MockTransport, RpcApp
+
+transport = MockTransport()
+async with RpcApp(transport) as app:
+    req = app.make("event", text="hello")
+    await app.publish(req.request)
 ```
 
 ## Transports
 
-| Transport     | When to use                |
-|---------------|----------------------------|
-| MockTransport | Unit tests, local dev      |
-| RmqTransport  | Production (RabbitMQ)      |
+| Transport             | When to use                |
+|-----------------------|----------------------------|
+| MockTransport         | Unit tests, local dev      |
+| RmqTransport          | Production (RabbitMQ)      |
+| ThreadSafeRmqTransport| Cross-event-loop usage     |
 
 ## License
 
