@@ -213,7 +213,9 @@ class RpcApp:
         ctx = RpcContext(app=self, direction="request", role="client", request=request)
         ctx = await self._run_app_mw(ctx)
 
-        ctx.body = self._serializer.dumps_request(request)
+        body, wire = self._serializer.dumps_request(request)
+        ctx.body = body
+        ctx.wire_headers.update(wire)
 
         ctx.state["call_kwds"] = kwds
         ctx = await self._run_wire_mw(ctx)
@@ -226,10 +228,10 @@ class RpcApp:
 
         ctx.direction = "response"
         ctx.body = response_bytes
-        ctx.wire_headers = response_wire
+        ctx.wire_headers = response_wire or {}
         ctx = await self._run_wire_mw(ctx)
 
-        response = self._serializer.loads_response(ctx.body)
+        response = self._serializer.loads_response(ctx.body, dict(ctx.wire_headers))
 
         ctx.direction = "response"
         ctx.response = response
@@ -272,7 +274,9 @@ class RpcApp:
         ctx = RpcContext(app=self, direction="request", role="client", request=request)
         ctx = await self._run_app_mw(ctx)
 
-        ctx.body = self._serializer.dumps_request(request)
+        body, wire = self._serializer.dumps_request(request)
+        ctx.body = body
+        ctx.wire_headers.update(wire)
 
         ctx.state["call_kwds"] = kwds
         ctx = await self._run_wire_mw(ctx)
@@ -295,7 +299,7 @@ class RpcApp:
         )
         ctx = await self._run_wire_mw(ctx)
 
-        request = self._serializer.loads_request(ctx.body)
+        request = self._serializer.loads_request(ctx.body, dict(ctx.wire_headers))
         ctx.request = request
 
         ctx = await self._run_app_mw(ctx)
@@ -313,8 +317,10 @@ class RpcApp:
         ctx.direction = "response"
         ctx = await self._run_app_mw(ctx)
 
-        ctx.body = self._serializer.dumps_response(ctx.response)  # type: ignore[arg-type]
         ctx.wire_headers = {}
+        body, wire = self._serializer.dumps_response(ctx.response)  # type: ignore[arg-type]
+        ctx.body = body
+        ctx.wire_headers.update(wire)
 
         ctx = await self._run_wire_mw(ctx)
 

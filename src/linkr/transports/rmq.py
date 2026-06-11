@@ -29,8 +29,6 @@ DEFAULT_REPLY_QUEUE_PREFIX = "rpc.reply"
 DEFAULT_REPLY_QUEUE_DURABLE = False
 DEFAULT_REPLY_QUEUE_EXCLUSIVE = True
 
-DEFAULT_CONTENT_TYPE = "application/json"
-
 
 class RmqTransport(Transport):
     """
@@ -56,9 +54,7 @@ class RmqTransport(Transport):
         reply_queue_prefix: str = DEFAULT_REPLY_QUEUE_PREFIX,
         reply_queue_durable: bool = DEFAULT_REPLY_QUEUE_DURABLE,
         reply_queue_exclusive: bool = DEFAULT_REPLY_QUEUE_EXCLUSIVE,
-        content_type: str = DEFAULT_CONTENT_TYPE,
     ) -> None:
-        self._content_type = content_type
         self._conn = SharedConnection(
             url,
             open_retry_policy=RetryPolicy(delays=list(open_retry_delays)),
@@ -103,10 +99,12 @@ class RmqTransport(Transport):
     ) -> None:
         props: dict[str, Any] = {
             "correlation_id": correlation_id,
-            "content_type": self._content_type,
         }
-        if wire_headers and "content_encoding" in wire_headers:
-            props["content_encoding"] = wire_headers["content_encoding"]
+        if wire_headers:
+            if "content_type" in wire_headers:
+                props["content_type"] = wire_headers["content_type"]
+            if "content_encoding" in wire_headers:
+                props["content_encoding"] = wire_headers["content_encoding"]
         await self._ops.publish(
             exchange="",
             data=data,
@@ -254,9 +252,7 @@ class RmqTransport(Transport):
         reply_to: str | None = None,
         wire_headers: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        properties: dict[str, Any] = {
-            "content_type": self._content_type,
-        }
+        properties: dict[str, Any] = {}
         if correlation_id is not None:
             properties["correlation_id"] = correlation_id
         if reply_to is not None:
@@ -267,6 +263,8 @@ class RmqTransport(Transport):
             properties["expiration"] = str(int(ttl * 1000))
 
         if wire_headers:
+            if "content_type" in wire_headers:
+                properties["content_type"] = wire_headers["content_type"]
             if "content_encoding" in wire_headers:
                 properties["content_encoding"] = wire_headers["content_encoding"]
 
