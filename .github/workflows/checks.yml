@@ -29,7 +29,10 @@ jobs:
     - name: Prepare images
       run: |
         docker pull rabbitmq:3-management
-    - name: Run linters
+    - name: Lint with ruff
+      run: |
+        poetry run ruff check src/linkr/
+    - name: Type check with mypy
       run: |
         poetry run mypy --config-file pyproject.toml src/linkr/
     - name: Run test

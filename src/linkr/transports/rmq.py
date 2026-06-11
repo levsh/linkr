@@ -6,12 +6,13 @@ import uuid
 from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any, TypeVar
 
-logger = logging.getLogger("linkr")
-
 from rmqaio import BindSpec, ConsumerSpec, ExchangeSpec, Ops, QueueSpec, Repeat, RetryPolicy, SharedConnection
 
 from linkr.models import RpcRequest, RpcResponse
 from linkr.transports import Transport
+
+logger = logging.getLogger("linkr")
+
 
 DEFAULT_EXCHANGE_NAME = "rpc"
 DEFAULT_EXCHANGE_TYPE = "direct"
