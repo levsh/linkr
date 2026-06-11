@@ -333,6 +333,7 @@ class RmqTransport(Transport):
         *,
         original: RpcRequest,
         wire_headers: dict[str, Any] | None = None,
+        **kwds: Any,
     ) -> None:
         """
         Publish a fire-and-forget message to the exchange.
@@ -346,6 +347,7 @@ class RmqTransport(Transport):
                 header extraction).
             wire_headers: Additional wire-level headers (content_type,
                 content_encoding, etc.).
+            **kwds: Ignored. Present for interface compatibility.
         """
         routing_key = self._resolve_routing_key(original)
         properties = self._build_properties(original, wire_headers=wire_headers)
@@ -362,6 +364,7 @@ class RmqTransport(Transport):
         *,
         original: RpcRequest,
         wire_headers: dict[str, Any] | None = None,
+        **kwds: Any,
     ) -> tuple[bytes, dict[str, str]]:
         """
         Publish a message and wait for the matching reply.
@@ -375,6 +378,7 @@ class RmqTransport(Transport):
                 routing, and header extraction).
             wire_headers: Additional wire-level headers (content_type,
                 content_encoding, etc.).
+            **kwds: Ignored. Present for interface compatibility.
 
         Returns:
             ``(response_bytes, response_wire_headers)``.
@@ -443,6 +447,7 @@ class ThreadSafeRmqTransport(RmqTransport):
         *,
         original: RpcRequest,
         wire_headers: dict[str, Any] | None = None,
+        **kwds: Any,
     ) -> tuple[bytes, dict[str, str]]:
         """
         Send a request and wait for the reply, safe for cross-loop usage.
@@ -454,11 +459,14 @@ class ThreadSafeRmqTransport(RmqTransport):
             data: Serialised request bytes.
             original: The original RPC request.
             wire_headers: Additional wire-level headers.
+            **kwds: Forwarded to :meth:`RmqTransport.request`.
 
         Returns:
             ``(response_bytes, response_wire_headers)``.
         """
-        return await self._bridge(super().request(data, original=original, wire_headers=wire_headers))
+        return await self._bridge(
+            super().request(data, original=original, wire_headers=wire_headers, **kwds),
+        )
 
     async def publish(
         self,
@@ -466,6 +474,7 @@ class ThreadSafeRmqTransport(RmqTransport):
         *,
         original: RpcRequest,
         wire_headers: dict[str, Any] | None = None,
+        **kwds: Any,
     ) -> None:
         """
         Publish a fire-and-forget message, safe for cross-loop usage.
@@ -477,5 +486,8 @@ class ThreadSafeRmqTransport(RmqTransport):
             data: Serialised request bytes.
             original: The original RPC request.
             wire_headers: Additional wire-level headers.
+            **kwds: Forwarded to :meth:`RmqTransport.publish`.
         """
-        return await self._bridge(super().publish(data, original=original, wire_headers=wire_headers))
+        return await self._bridge(
+            super().publish(data, original=original, wire_headers=wire_headers, **kwds),
+        )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gzip
+from typing import Any
 
 from linkr.middleware.base import WireMiddleware
 from linkr.models import RpcRequest, RpcResponse
@@ -34,6 +35,7 @@ class GzipMiddleware(WireMiddleware):
         headers: dict[str, str],
         request: RpcRequest,
         response: RpcResponse | None = None,
+        **kwds: Any,
     ) -> tuple[bytes, dict[str, str]]:
         """
         Compress data with gzip if its size is at least *min_size*.
@@ -46,6 +48,7 @@ class GzipMiddleware(WireMiddleware):
             headers: Wire-level headers (mutated in-place if compressed).
             request: The original RPC request.
             response: The RPC response, if available (``None`` for request path).
+            **kwds: Additional call context forwarded from the caller.
 
         Returns:
             The (possibly compressed) ``(data, headers)`` tuple.
@@ -60,6 +63,7 @@ class GzipMiddleware(WireMiddleware):
         data: bytes,
         headers: dict[str, str],
         request: RpcRequest,
+        **kwds: Any,
     ) -> tuple[bytes, dict[str, str]]:
         """
         Decompress gzip-encoded data.
@@ -71,6 +75,7 @@ class GzipMiddleware(WireMiddleware):
             data: Possibly compressed payload bytes.
             headers: Wire-level headers (checked for ``content_encoding``).
             request: The original RPC request.
+            **kwds: Additional call context forwarded from the caller.
 
         Returns:
             The (possibly decompressed) ``(data, headers)`` tuple.

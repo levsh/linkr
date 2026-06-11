@@ -82,6 +82,7 @@ class MockTransport(Transport):
         *,
         original: RpcRequest,
         wire_headers: dict[str, Any] | None = None,
+        **kwds: Any,
     ) -> None:
         """
         Publish a fire-and-forget message.
@@ -93,6 +94,7 @@ class MockTransport(Transport):
             data: Serialised request bytes (not used by mock).
             original: The original RPC request (stored in sent_messages).
             wire_headers: Wire-level headers (not used by mock).
+            **kwds: Ignored. Present for interface compatibility.
         """
         self.sent_messages.append(original)
 
@@ -102,6 +104,7 @@ class MockTransport(Transport):
         *,
         original: RpcRequest,
         wire_headers: dict[str, Any] | None = None,
+        **kwds: Any,
     ) -> tuple[bytes, dict[str, str]]:
         """
         Send a request and return the handler's response.
@@ -116,6 +119,7 @@ class MockTransport(Transport):
             original: The original RPC request (forwarded to handler and
                 stored in sent_messages).
             wire_headers: Wire-level headers (forwarded to handler).
+            **kwds: Ignored. Present for interface compatibility.
 
         Returns:
             ``(response_bytes, response_wire_headers)`` as returned by the

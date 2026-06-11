@@ -1,10 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import pytest
 
-from linkr import AppMiddleware, Depends, GzipMiddleware, MockTransport, RpcApp, RpcError, WireMiddleware
+from linkr import (
+    AppMiddleware,
+    Depends,
+    GzipMiddleware,
+    MockTransport,
+    RpcApp,
+    RpcError,
+    WireMiddleware,
+)
 from linkr.models import RpcRequest, RpcResponse
 
 
@@ -90,11 +99,11 @@ async def test_add_middleware(app: RpcApp):
     events: list[str] = []
 
     class TestMiddleware(AppMiddleware):
-        async def process_request(self, request: RpcRequest) -> RpcRequest:
+        async def process_request(self, request: RpcRequest, **kwds: Any) -> RpcRequest:
             events.append("process_request")
             return request
 
-        async def process_response(self, request: RpcRequest, response: RpcResponse) -> RpcResponse:
+        async def process_response(self, request: RpcRequest, response: RpcResponse, **kwds: Any) -> RpcResponse:
             events.append("process_response")
             return response
 
@@ -116,20 +125,20 @@ async def test_multiple_middleware_order(app: RpcApp):
     events: list[str] = []
 
     class MwA(AppMiddleware):
-        async def process_request(self, request: RpcRequest) -> RpcRequest:
+        async def process_request(self, request: RpcRequest, **kwds: Any) -> RpcRequest:
             events.append("A-process_request")
             return request
 
-        async def process_response(self, request: RpcRequest, response: RpcResponse) -> RpcResponse:
+        async def process_response(self, request: RpcRequest, response: RpcResponse, **kwds: Any) -> RpcResponse:
             events.append("A-process_response")
             return response
 
     class MwB(AppMiddleware):
-        async def process_request(self, request: RpcRequest) -> RpcRequest:
+        async def process_request(self, request: RpcRequest, **kwds: Any) -> RpcRequest:
             events.append("B-process_request")
             return request
 
-        async def process_response(self, request: RpcRequest, response: RpcResponse) -> RpcResponse:
+        async def process_response(self, request: RpcRequest, response: RpcResponse, **kwds: Any) -> RpcResponse:
             events.append("B-process_response")
             return response
 
@@ -170,10 +179,10 @@ async def test_middleware_lifecycle():
         async def close(self):
             self.close_called = True
 
-        async def process_request(self, request):
+        async def process_request(self, request, **kwds: Any):
             return request
 
-        async def process_response(self, request, response):
+        async def process_response(self, request, response, **kwds: Any):
             return response
 
     mw = LifecycleMiddleware()
@@ -534,20 +543,20 @@ async def test_wire_middleware_order():
     events: list[str] = []
 
     class MwA(WireMiddleware):
-        async def send(self, data, headers, request, response=None):
+        async def send(self, data, headers, request, response=None, **kwds: Any):
             events.append("A-send")
             return data, headers
 
-        async def receive(self, data, headers, request):
+        async def receive(self, data, headers, request, **kwds: Any):
             events.append("A-receive")
             return data, headers
 
     class MwB(WireMiddleware):
-        async def send(self, data, headers, request, response=None):
+        async def send(self, data, headers, request, response=None, **kwds: Any):
             events.append("B-send")
             return data, headers
 
-        async def receive(self, data, headers, request):
+        async def receive(self, data, headers, request, **kwds: Any):
             events.append("B-receive")
             return data, headers
 
@@ -583,11 +592,11 @@ async def test_wire_headers_roundtrip():
     received_headers: list[dict[str, str]] = []
 
     class HeaderInjector(WireMiddleware):
-        async def send(self, data, headers, request, response=None):
+        async def send(self, data, headers, request, response=None, **kwds: Any):
             headers["x-custom"] = "test-value"
             return data, headers
 
-        async def receive(self, data, headers, request):
+        async def receive(self, data, headers, request, **kwds: Any):
             received_headers.append(dict(headers))
             return data, headers
 
@@ -667,11 +676,11 @@ async def test_custom_wire_header_survives_roundtrip():
     server_seen: list[str] = []
 
     class CustomWireHeaderMw(WireMiddleware):
-        async def send(self, data, headers, request, response=None):
+        async def send(self, data, headers, request, response=None, **kwds: Any):
             headers["x-custom"] = "hello"
             return data, headers
 
-        async def receive(self, data, headers, request):
+        async def receive(self, data, headers, request, **kwds: Any):
             server_seen.append(headers.get("x-custom", ""))
             return data, headers
 

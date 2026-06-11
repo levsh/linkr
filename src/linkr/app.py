@@ -370,29 +370,30 @@ class RpcApp:
             request.headers["rttl"] = rttl
 
         for amw in self._app_mw:
-            request = await amw.process_request(request)
+            request = await amw.process_request(request, **kwds)
 
         body, wire = self._serializer.dumps_request(request)
 
         for wmw in self._wire_mw:
-            body, wire = await wmw.send(body, wire, request)
+            body, wire = await wmw.send(body, wire, request, **kwds)
 
         response_bytes, response_wire = await self._transport.request(
             body,
             original=request,
             wire_headers=wire or None,
+            **kwds,
         )
 
         body = response_bytes
         wire = response_wire or {}
 
         for wmw in self._wire_mw:
-            body, wire = await wmw.receive(body, wire, request)
+            body, wire = await wmw.receive(body, wire, request, **kwds)
 
         response = self._serializer.loads_response(body, wire)
 
         for amw in self._app_mw:
-            response = await amw.process_response(request, response)
+            response = await amw.process_response(request, response, **kwds)
 
         if response.data and "error_code" in response.data:
             raise RpcError(
@@ -446,14 +447,16 @@ class RpcApp:
             request.headers["rttl"] = rttl
 
         for amw in self._app_mw:
-            request = await amw.process_request(request)
+            request = await amw.process_request(request, **kwds)
 
         body, wire = self._serializer.dumps_request(request)
 
         for wmw in self._wire_mw:
-            body, wire = await wmw.send(body, wire, request)
+            body, wire = await wmw.send(body, wire, request, **kwds)
 
-        await self._transport.publish(body, original=request, wire_headers=wire or None)
+        await self._transport.publish(
+            body, original=request, wire_headers=wire or None, **kwds,
+        )
 
     async def _request_handler(
         self,

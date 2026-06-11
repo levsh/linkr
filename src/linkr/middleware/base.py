@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import Any
 
 from linkr.models import RpcRequest, RpcResponse
 
@@ -38,7 +39,7 @@ class AppMiddleware(BaseMiddleware):
     """
 
     @abstractmethod
-    async def process_request(self, request: RpcRequest) -> RpcRequest:
+    async def process_request(self, request: RpcRequest, **kwds: Any) -> RpcRequest:
         """
         Process a request before it reaches the handler.
 
@@ -49,13 +50,14 @@ class AppMiddleware(BaseMiddleware):
 
         Args:
             request: The incoming or outgoing RPC request.
+            **kwds: Additional call context forwarded from the caller.
 
         Returns:
             The (possibly modified) request.
         """
 
     @abstractmethod
-    async def process_response(self, request: RpcRequest, response: RpcResponse) -> RpcResponse:
+    async def process_response(self, request: RpcRequest, response: RpcResponse, **kwds: Any) -> RpcResponse:
         """
         Process a response after the handler has run.
 
@@ -66,6 +68,7 @@ class AppMiddleware(BaseMiddleware):
         Args:
             request: The original RPC request (read-only).
             response: The outgoing or incoming RPC response.
+            **kwds: Additional call context forwarded from the caller.
 
         Returns:
             The (possibly modified) response.
@@ -87,6 +90,7 @@ class WireMiddleware(BaseMiddleware):
         headers: dict[str, str],
         request: RpcRequest,
         response: RpcResponse | None = None,
+        **kwds: Any,
     ) -> tuple[bytes, dict[str, str]]:
         """
         Transform data being sent TO the transport.
@@ -99,6 +103,7 @@ class WireMiddleware(BaseMiddleware):
             headers: Wire-level headers (e.g. content_type, content_encoding).
             request: The original RPC request.
             response: The RPC response, if available (``None`` for request path).
+            **kwds: Additional call context forwarded from the caller.
 
         Returns:
             The (possibly modified) ``(data, headers)`` tuple.
@@ -110,6 +115,7 @@ class WireMiddleware(BaseMiddleware):
         data: bytes,
         headers: dict[str, str],
         request: RpcRequest,
+        **kwds: Any,
     ) -> tuple[bytes, dict[str, str]]:
         """
         Transform data received FROM the transport.
@@ -121,6 +127,7 @@ class WireMiddleware(BaseMiddleware):
             data: The raw payload bytes.
             headers: Wire-level headers (e.g. content_type, content_encoding).
             request: The original RPC request.
+            **kwds: Additional call context forwarded from the caller.
 
         Returns:
             The (possibly modified) ``(data, headers)`` tuple.

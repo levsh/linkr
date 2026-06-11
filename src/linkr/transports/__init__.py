@@ -74,6 +74,7 @@ class Transport(ABC):
         *,
         original: RpcRequest,
         wire_headers: dict[str, Any] | None = None,
+        **kwds: Any,
     ) -> None:
         """
         Publish a fire-and-forget RPC request.
@@ -82,6 +83,7 @@ class Transport(ABC):
             data: Serialized and encoded request bytes.
             original: The original RpcRequest (for routing metadata).
             wire_headers: Additional wire-level headers (e.g. content-encoding).
+            **kwds: Extra arguments forwarded from :meth:`RpcApp.publish`.
         """
 
     @abstractmethod
@@ -91,6 +93,7 @@ class Transport(ABC):
         *,
         original: RpcRequest,
         wire_headers: dict[str, Any] | None = None,
+        **kwds: Any,
     ) -> tuple[bytes, dict[str, str]]:
         """
         Send an RPC request and wait for a matching response.
@@ -99,6 +102,7 @@ class Transport(ABC):
             data: Serialized and encoded request bytes.
             original: The original RpcRequest (for routing metadata).
             wire_headers: Additional wire-level headers.
+            **kwds: Extra arguments forwarded from :meth:`RpcApp.call`.
 
         Returns:
             Tuple of (raw_response_bytes, response_wire_headers).
