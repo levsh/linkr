@@ -9,7 +9,7 @@ from linkr.models import RpcContext, RpcData, RpcHeaders, RpcRequest, RpcRespons
 from linkr.serializer import JsonSerializer, Serializer
 from linkr.transports import Transport
 from linkr.transports.mock import MockTransport
-from linkr.transports.rmq import RmqTransport
+from linkr.transports.rmq import RmqTransport, ThreadSafeRmqTransport
 
 __all__ = [
     "Depends",
@@ -32,6 +32,7 @@ __all__ = [
     "Transport",
     "MockTransport",
     "RmqTransport",
+    "ThreadSafeRmqTransport",
 ]
 
 

@@ -3,8 +3,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from collections.abc import Awaitable, Callable
-from typing import Any
+from collections.abc import Awaitable, Callable, Coroutine
+from typing import Any, TypeVar
 
 logger = logging.getLogger("linkr")
 
@@ -318,3 +318,47 @@ class RmqTransport(Transport):
             return await fut
         finally:
             self._pending.pop(correlation_id, None)
+
+
+T = TypeVar("T")
+
+
+class ThreadSafeRmqTransport(RmqTransport):
+    """
+    RabbitMQ transport with thread-safe publish/request.
+
+    Preserves a single RabbitMQ connection regardless of which
+    event loop calls publish() or request().  Both methods are
+    bridged to the owner loop (the one that called init())
+    via run_coroutine_threadsafe when necessary.
+    """
+
+    async def init(self) -> None:
+        self._owner_loop = asyncio.get_running_loop()
+        await super().init()
+
+    async def _bridge(self, coro: Coroutine[Any, Any, T]) -> T:
+        loop = asyncio.get_running_loop()
+        if loop is self._owner_loop:
+            return await coro
+        return await asyncio.wrap_future(
+            asyncio.run_coroutine_threadsafe(coro, self._owner_loop),
+        )
+
+    async def request(
+        self,
+        data: bytes,
+        *,
+        original: RpcRequest,
+        wire_headers: dict[str, Any] | None = None,
+    ) -> tuple[bytes, dict[str, str]]:
+        return await self._bridge(super().request(data, original=original, wire_headers=wire_headers))
+
+    async def publish(
+        self,
+        data: bytes,
+        *,
+        original: RpcRequest,
+        wire_headers: dict[str, Any] | None = None,
+    ) -> None:
+        return await self._bridge(super().publish(data, original=original, wire_headers=wire_headers))
