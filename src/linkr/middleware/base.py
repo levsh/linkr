@@ -6,29 +6,80 @@ from linkr.models import RpcRequest, RpcResponse
 
 
 class BaseMiddleware(ABC):
-    """Base class for all middleware. Optional lifecycle hooks: init() and close()."""
+    """
+    Base class for all middleware.
+
+    Provides optional lifecycle hooks that are called by :class:`RpcApp`
+    during startup and shutdown.
+    """
 
     async def init(self) -> None:
-        """Initialize middleware when the app starts."""
+        """
+        Initialise middleware resources when the app starts.
+
+        Override this method to set up connections, open files, etc.
+        """
 
     async def close(self) -> None:
-        """Clean up middleware resources on app shutdown."""
+        """
+        Clean up middleware resources on app shutdown.
+
+        Override this method to release connections, close files, etc.
+        """
 
 
 class AppMiddleware(BaseMiddleware):
-    """Middleware that works with deserialized request/response objects."""
+    """
+    Middleware that works with deserialised request/response objects.
+
+    App-level middleware operates on the parsed :class:`RpcRequest` and
+    :class:`RpcResponse` so it has full access to the message content
+    without needing to deal with serialization.
+    """
 
     @abstractmethod
     async def process_request(self, request: RpcRequest) -> RpcRequest:
-        """Called before handler. Return (possibly modified) request. Raise exception to cancel."""
+        """
+        Process a request before it reaches the handler.
+
+        Called twice for every synchronous call:
+        once on the client side (after serialization) and once on the
+        server side (before dispatch). Raise an exception to abort
+        processing.
+
+        Args:
+            request: The incoming or outgoing RPC request.
+
+        Returns:
+            The (possibly modified) request.
+        """
 
     @abstractmethod
     async def process_response(self, request: RpcRequest, response: RpcResponse) -> RpcResponse:
-        """Called after handler. Return (possibly modified) response."""
+        """
+        Process a response after the handler has run.
+
+        Called twice for every synchronous call:
+        once on the server side (after dispatch) and once on the client
+        side (before returning to the caller).
+
+        Args:
+            request: The original RPC request (read-only).
+            response: The outgoing or incoming RPC response.
+
+        Returns:
+            The (possibly modified) response.
+        """
 
 
 class WireMiddleware(BaseMiddleware):
-    """Middleware that works with raw bytes and wire-level headers."""
+    """
+    Middleware that works with raw bytes and wire-level headers.
+
+    Wire-level middleware operates on the serialised byte payload and
+    wire-level metadata headers. This is suitable for compression,
+    encryption, or custom encoding layers.
+    """
 
     async def send(
         self,
@@ -37,7 +88,21 @@ class WireMiddleware(BaseMiddleware):
         request: RpcRequest,
         response: RpcResponse | None = None,
     ) -> tuple[bytes, dict[str, str]]:
-        """Transform data going TO the transport (client req + server res)."""
+        """
+        Transform data being sent TO the transport.
+
+        Called for both client requests (before transport send) and
+        server responses (before transport send back to client).
+
+        Args:
+            data: The raw payload bytes.
+            headers: Wire-level headers (e.g. content_type, content_encoding).
+            request: The original RPC request.
+            response: The RPC response, if available (``None`` for request path).
+
+        Returns:
+            The (possibly modified) ``(data, headers)`` tuple.
+        """
         return data, headers
 
     async def receive(
@@ -46,5 +111,18 @@ class WireMiddleware(BaseMiddleware):
         headers: dict[str, str],
         request: RpcRequest,
     ) -> tuple[bytes, dict[str, str]]:
-        """Transform data coming FROM the transport (server req + client res)."""
+        """
+        Transform data received FROM the transport.
+
+        Called for both server requests (after transport receive) and
+        client responses (after transport receive).
+
+        Args:
+            data: The raw payload bytes.
+            headers: Wire-level headers (e.g. content_type, content_encoding).
+            request: The original RPC request.
+
+        Returns:
+            The (possibly modified) ``(data, headers)`` tuple.
+        """
         return data, headers

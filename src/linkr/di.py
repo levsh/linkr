@@ -7,11 +7,17 @@ T = TypeVar("T")
 
 
 class Depends(Generic[T]):
-    """Marker for dependency injection in handler parameters.
+    """
+    Marker for dependency injection in handler parameters.
 
-    Usage::
+    Use ``Depends[T]`` as a type hint on handler parameters to signal
+    that the value should be resolved from the :class:`DiContainer`
+    rather than from the RPC arguments.
 
-        def get_user(user_id: int, db: Depends[Database]) -> dict: ...
+    Example::
+
+        def get_user(user_id: int, db: Depends[Database]) -> dict:
+            ...
     """
 
 
@@ -19,7 +25,11 @@ class DiContainer:
     """
     Registry of dependency types.
 
-    Usage::
+    Stores factories for singleton and transient dependencies.
+    Singleton factories are called once and the result is cached.
+    Transient factories produce a new instance on every resolution.
+
+    Example::
 
         container = DiContainer()
         container.add_singleton(Database, lambda: Database("postgres://..."))
@@ -27,12 +37,21 @@ class DiContainer:
     """
 
     def __init__(self) -> None:
+        """
+        Initialize empty container.
+
+        Attributes:
+            _singletons: Cached singleton instances.
+            _singleton_factories: Factories for singletons not yet resolved.
+            _transients: Factories for transient dependencies.
+        """
         self._singletons: dict[type, Any] = {}
         self._singleton_factories: dict[type, Callable[[], Any]] = {}
         self._transients: dict[type, Callable[[], Any]] = {}
 
     def add_singleton(self, type_: type, factory: Callable[[], Any]) -> None:
-        """Register a singleton dependency.
+        """
+        Register a singleton dependency.
 
         The factory is called once on first resolve and the result is
         cached for all future resolutions.
@@ -44,7 +63,8 @@ class DiContainer:
         self._singleton_factories[type_] = factory
 
     def add_transient(self, type_: type, factory: Callable[[], Any]) -> None:
-        """Register a transient dependency.
+        """
+        Register a transient dependency.
 
         A new instance is created by calling the factory every time the
         dependency is resolved.
@@ -56,7 +76,8 @@ class DiContainer:
         self._transients[type_] = factory
 
     def resolve(self, type_: type) -> Any:
-        """Resolve a dependency by type.
+        """
+        Resolve a dependency by type.
 
         Args:
             type_: The type to resolve.

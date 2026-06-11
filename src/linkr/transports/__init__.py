@@ -12,16 +12,30 @@ class Transport(ABC):
     Abstract transport for RPC message exchange.
 
     Transport operates on raw bytes. Serialization and encoding are
-    handled by RpcApp before data reaches the transport.
+    handled by :class:`RpcApp` before data reaches the transport.
+
+    Implementations must provide :meth:`init`, :meth:`close`,
+    :meth:`publish`, :meth:`request`, :meth:`consume`, and
+    :meth:`stop_consume`.
     """
 
     @abstractmethod
     async def init(self) -> None:
-        """Open connections and declare required infrastructure."""
+        """
+        Open connections and declare required infrastructure.
+
+        Called once during application startup before any messages are
+        sent or received.
+        """
 
     @abstractmethod
     async def close(self) -> None:
-        """Gracefully shut down the transport."""
+        """
+        Gracefully shut down the transport.
+
+        Called during application shutdown. Should release all
+        connections and resources.
+        """
 
     @abstractmethod
     async def consume(
@@ -45,7 +59,13 @@ class Transport(ABC):
 
     @abstractmethod
     async def stop_consume(self) -> None:
-        """Stop consuming incoming requests."""
+        """
+        Stop consuming incoming requests without closing the transport.
+
+        After this call the transport can still be used for sending,
+        but will no longer deliver incoming messages to the registered
+        handler.
+        """
 
     @abstractmethod
     async def publish(

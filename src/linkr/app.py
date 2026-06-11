@@ -19,7 +19,13 @@ from linkr.transports import Transport
 
 
 class RpcCall:
-    """Builder for executing a prepared RPC request."""
+    """
+    Builder for executing a prepared RPC request.
+
+    Returned by :meth:`RpcApp.make` to allow deferred or repeated execution
+    of the same request with optional per-call overrides for timeout, TTL,
+    and rTTL.
+    """
 
     def __init__(self, app: RpcApp, request: RpcRequest) -> None:
         self._app = app
@@ -27,10 +33,12 @@ class RpcCall:
 
     @property
     def app(self) -> RpcApp:
+        """The RpcApp instance this call belongs to."""
         return self._app
 
     @property
     def request(self) -> RpcRequest:
+        """The prepared RpcRequest to send."""
         return self._request
 
     async def __call__(
@@ -41,6 +49,24 @@ class RpcCall:
         rttl: float | None = None,
         **kwds: Any,
     ) -> Any:
+        """
+        Execute the RPC call.
+
+        Shorthand for ``await self.app.call(self.request, ...)``.
+
+        Args:
+            timeout: Maximum seconds to wait for a response.
+            ttl: Message time-to-live in seconds (broker discards expired).
+            rttl: Response TTL in seconds.
+            **kwds: Forwarded to :meth:`RpcApp.call`.
+
+        Returns:
+            The handler's return value.
+
+        Raises:
+            RpcError: If the server returned an error response.
+            RuntimeError: If the app is closed.
+        """
         return await self._app.call(self._request, timeout=timeout, ttl=ttl, rttl=rttl, **kwds)
 
     async def call(
@@ -51,6 +77,25 @@ class RpcCall:
         rttl: float | None = None,
         **kwds: Any,
     ) -> Any:
+        """
+        Execute the RPC call.
+
+        Shorthand for ``await self.app.call(self.request, ...)``.
+        Identical to :meth:`__call__`.
+
+        Args:
+            timeout: Maximum seconds to wait for a response.
+            ttl: Message time-to-live in seconds (broker discards expired).
+            rttl: Response TTL in seconds.
+            **kwds: Forwarded to :meth:`RpcApp.call`.
+
+        Returns:
+            The handler's return value.
+
+        Raises:
+            RpcError: If the server returned an error response.
+            RuntimeError: If the app is closed.
+        """
         return await self._app.call(self._request, timeout=timeout, ttl=ttl, rttl=rttl, **kwds)
 
 
@@ -58,8 +103,27 @@ class RpcApp:
     """
     Main RPC application: register handlers, send requests, manage middleware.
 
-    Orchestrates serialization, encoding (compression/encryption), object-level
-    middleware and transport communication.
+    Typical usage::
+
+        transport = MockTransport()
+        app = RpcApp(transport)
+
+        @app.method("add")
+        def add(x: int, y: int) -> int:
+            return x + y
+
+        await app.init()
+        await app.consume()
+        result = await app.make("add", 2, 3).call()
+        await app.close()
+
+    Args:
+        transport: Backend used for message exchange (e.g. MockTransport, RmqTransport).
+        timeout: Default timeout in seconds for all calls.
+        ttl: Default message TTL in seconds.
+        rttl: Default response TTL in seconds.
+        serializer: Serializer for request/response encoding.
+            Defaults to :class:`JsonSerializer`.
     """
 
     def __init__(
@@ -83,6 +147,19 @@ class RpcApp:
         self.dependencies = DiContainer()
 
     def add_middleware(self, mw: AppMiddleware | WireMiddleware) -> None:
+        """
+        Register a middleware.
+
+        App-level middleware is applied in registration order
+        around request/response processing.
+        Wire-level middleware is applied in send/receive order around the
+        transport.
+
+        Args:
+            mw: Middleware instance. AppMiddleware is added to the app chain
+                (deserialized objects); WireMiddleware is added to the wire
+                chain (raw bytes).
+        """
         if isinstance(mw, WireMiddleware):
             self._wire_mw.append(mw)
         else:
@@ -93,7 +170,18 @@ class RpcApp:
         name: str,
         **options: Any,
     ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-        """Decorator that registers an RPC handler."""
+        """
+        Register an RPC handler via a decorator.
+
+        Args:
+            name: Method name used for routing (e.g. ``"add"`` or ``"api/user/get"``).
+            **options: Arbitrary metadata stored in :attr:`HandlerInfo.options`.
+                Use ``validate_types=True`` to enable Pydantic type validation
+                of handler arguments.
+
+        Returns:
+            Decorator that wraps the handler function and registers it.
+        """
 
         def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
             @wraps(fn)
@@ -121,10 +209,20 @@ class RpcApp:
         return decorator
 
     def get_handler(self, name: str) -> HandlerInfo | None:
+        """
+        Look up a registered handler by method name.
+
+        Args:
+            name: The method name used at registration time.
+
+        Returns:
+            The handler metadata, or None if no handler is registered under *name*.
+        """
         return self._handlers.get(name)
 
     @property
     def methods(self) -> dict[str, HandlerInfo]:
+        """All registered handlers keyed by method name."""
         return dict(self._handlers)
 
     def _routing_key(self, method: str) -> str:
@@ -142,6 +240,20 @@ class RpcApp:
         *args: Any,
         **kwds: Any,
     ) -> RpcCall:
+        """
+        Create an RpcCall for a method with positional/keyword arguments.
+
+        This is a shorthand for building an :class:`RpcRequest` and wrapping
+        it in an :class:`RpcCall`.
+
+        Args:
+            method: The registered method name.
+            *args: Positional arguments for the handler.
+            **kwds: Keyword arguments for the handler.
+
+        Returns:
+            An :class:`RpcCall` ready to be executed with ``.call()`` or ``await``.
+        """
         request = RpcRequest(
             id=uuid4(),
             headers={"routing_key": self._routing_key(method)},
@@ -150,6 +262,11 @@ class RpcApp:
         return RpcCall(self, request)
 
     async def init(self) -> None:
+        """
+        Open transport and initialise all middleware.
+
+        Must be called before :meth:`consume`, :meth:`call`, or :meth:`publish`.
+        """
         await self._transport.init()
         for amw in self._app_mw:
             await amw.init()
@@ -157,6 +274,16 @@ class RpcApp:
             await wmw.init()
 
     async def close(self) -> None:
+        """
+        Shut down the application.
+
+        Order of shutdown:
+
+        1. Stop consuming requests.
+        2. Close app-level middleware (reverse order).
+        3. Close wire-level middleware (reverse order).
+        4. Close transport.
+        """
         await self.stop_consume()
         for amw in reversed(self._app_mw):
             await amw.close()
@@ -166,6 +293,16 @@ class RpcApp:
         self._closed = True
 
     async def consume(self) -> None:
+        """
+        Start listening for incoming RPC requests on the transport.
+
+        Registers the internal request handler on the main server queue and
+        on any group-specific queues derived from method names containing
+        ``/`` (e.g. ``"api/user/get"`` creates a queue for group ``"api"``).
+
+        Raises:
+            RuntimeError: If the app has already been closed.
+        """
         if self._closed:
             raise RuntimeError("RpcApp is closed")
         await self._transport.consume(self._request_handler)
@@ -179,6 +316,7 @@ class RpcApp:
             await self._transport.consume(self._request_handler, queue=group)
 
     async def stop_consume(self) -> None:
+        """Stop listening for incoming RPC requests."""
         await self._transport.stop_consume()
 
     async def call(
@@ -190,6 +328,32 @@ class RpcApp:
         rttl: float | None = None,
         **kwds: Any,
     ) -> Any:
+        """
+        Send an RPC request and await the response.
+
+        Runs the full middleware pipeline: app-level request middleware,
+        serialization, wire-level send middleware, transport request,
+        wire-level receive middleware, deserialization, app-level response
+        middleware.
+
+        Args:
+            request: The prepared RPC request to send.
+            timeout: Maximum seconds to wait for a response.
+                Falls back to the app-level default if not set.
+            ttl: Message time-to-live in seconds (broker discards expired).
+                Falls back to the app-level default; if neither is set
+                but *timeout* is given, TTL is set to the same value.
+            rttl: Response TTL in seconds.
+            **kwds: Forwarded to the transport layer.
+
+        Returns:
+            The handler's return value.
+
+        Raises:
+            RuntimeError: If the app is closed.
+            RpcError: If the server returned an error response
+                (error_code, error_message, error_details).
+        """
         if self._closed:
             raise RuntimeError("RpcApp is closed")
 
@@ -249,6 +413,23 @@ class RpcApp:
         rttl: float | None = None,
         **kwds: Any,
     ) -> None:
+        """
+        Publish an RPC request (fire-and-forget).
+
+        The message is sent but no response is expected. Useful for
+        notifications or one-way events. The middleware pipeline is
+        processed up to transport send; the response path is skipped.
+
+        Args:
+            request: The prepared RPC request to publish.
+            timeout: Default call timeout (stored in request headers).
+            ttl: Message time-to-live. Falls back to *timeout* if not set.
+            rttl: Response TTL (stored in request headers).
+            **kwds: Forwarded to the transport layer.
+
+        Raises:
+            RuntimeError: If the app is closed.
+        """
         if self._closed:
             raise RuntimeError("RpcApp is closed")
 
@@ -411,8 +592,10 @@ class RpcApp:
             )
 
     async def __aenter__(self) -> RpcApp:
+        """Enter async context: calls :meth:`init` and returns self."""
         await self.init()
         return self
 
     async def __aexit__(self, *args: Any) -> None:
+        """Exit async context: calls :meth:`close`."""
         await self.close()

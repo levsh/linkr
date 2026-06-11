@@ -14,7 +14,7 @@ class RpcRequest(BaseModel):
 
     Attributes:
         id: Unique request identifier.
-        headers: Arbitrary metadata (routing_key, ttl, timeout, rttl).
+        headers: Arbitrary metadata.
         data: Payload, typically a dict with method, args, kwds.
     """
 
@@ -29,7 +29,7 @@ class RpcResponse(BaseModel):
 
     Attributes:
         id: Mirrors the corresponding request id.
-        headers: Arbitrary metadata (rttl, etc.).
+        headers: Arbitrary metadata.
         data: Result payload or error fields (error_code, error_message, error_details).
     """
 
