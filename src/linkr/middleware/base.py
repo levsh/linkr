@@ -1,57 +1,50 @@
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from abc import ABC, abstractmethod
 
-from linkr.models import RpcContext
-
-if TYPE_CHECKING:
-    from linkr.app import RpcApp
+from linkr.models import RpcRequest, RpcResponse
 
 
-class BaseMiddleware:
-    """
-    Base class for RPC middleware.
+class BaseMiddleware(ABC):
+    """Base class for all middleware. Optional lifecycle hooks: init() and close()."""
 
-    Subclasses override dispatch() to intercept the request/response
-    flow. Optional lifecycle hooks: init() and close().
-    """
-
-    async def init(self, app: RpcApp) -> None:
-        """
-        Initialize middleware when the app starts.
-
-        Args:
-            app: The RpcApp instance.
-        """
+    async def init(self) -> None:
+        """Initialize middleware when the app starts."""
 
     async def close(self) -> None:
         """Clean up middleware resources on app shutdown."""
 
-    async def dispatch(
-        self,
-        ctx: RpcContext,
-        call_next: Callable[..., Any],
-    ) -> RpcContext:
-        """
-        Intercept the request/response context.
-
-        Call call_next(ctx) to continue the chain, or return ctx early
-        to short-circuit.
-
-        Args:
-            ctx: The current RpcContext.
-            call_next: Continuation that invokes the next middleware or handler.
-
-        Returns:
-            The (possibly mutated) RpcContext.
-        """
-        return await call_next(ctx)
-
 
 class AppMiddleware(BaseMiddleware):
-    """Base for middleware that works with deserialized request/response objects."""
+    """Middleware that works with deserialized request/response objects."""
+
+    @abstractmethod
+    async def process_request(self, request: RpcRequest) -> RpcRequest:
+        """Called before handler. Return (possibly modified) request. Raise exception to cancel."""
+
+    @abstractmethod
+    async def process_response(self, request: RpcRequest, response: RpcResponse) -> RpcResponse:
+        """Called after handler. Return (possibly modified) response."""
 
 
 class WireMiddleware(BaseMiddleware):
-    """Base for middleware that works with raw bytes in RpcContext.body."""
+    """Middleware that works with raw bytes and wire-level headers."""
+
+    async def send(
+        self,
+        data: bytes,
+        headers: dict[str, str],
+        request: RpcRequest,
+        response: RpcResponse | None = None,
+    ) -> tuple[bytes, dict[str, str]]:
+        """Transform data going TO the transport (client req + server res)."""
+        return data, headers
+
+    async def receive(
+        self,
+        data: bytes,
+        headers: dict[str, str],
+        request: RpcRequest,
+    ) -> tuple[bytes, dict[str, str]]:
+        """Transform data coming FROM the transport (server req + client res)."""
+        return data, headers

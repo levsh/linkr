@@ -5,7 +5,7 @@ import asyncio
 import pytest
 
 from linkr import AppMiddleware, Depends, GzipMiddleware, MockTransport, RpcApp, RpcError, WireMiddleware
-from linkr.models import RpcResponse
+from linkr.models import RpcRequest, RpcResponse
 
 
 async def test_register_method(app: RpcApp):
@@ -90,11 +90,13 @@ async def test_add_middleware(app: RpcApp):
     events: list[str] = []
 
     class TestMiddleware(AppMiddleware):
-        async def dispatch(self, ctx, call_next):
-            events.append(f"before-{ctx.direction}-{ctx.role}")
-            result = await call_next(ctx)
-            events.append(f"after-{ctx.direction}-{ctx.role}")
-            return result
+        async def process_request(self, request: RpcRequest) -> RpcRequest:
+            events.append("process_request")
+            return request
+
+        async def process_response(self, request: RpcRequest, response: RpcResponse) -> RpcResponse:
+            events.append("process_response")
+            return response
 
     middleware = TestMiddleware()
     app.add_middleware(middleware)
@@ -106,28 +108,30 @@ async def test_add_middleware(app: RpcApp):
     await app.consume()
     result = await app.make("ping").call()
     assert result == "pong"
-    assert "before-request-client" in events
-    assert "after-request-client" in events
-    assert "before-response-client" in events
-    assert "after-response-client" in events
+    assert events.count("process_request") == 2  # client + server
+    assert events.count("process_response") == 2  # server + client
 
 
 async def test_multiple_middleware_order(app: RpcApp):
     events: list[str] = []
 
     class MwA(AppMiddleware):
-        async def dispatch(self, ctx, call_next):
-            events.append(f"A-enter-{ctx.direction}-{ctx.role}")
-            r = await call_next(ctx)
-            events.append(f"A-exit-{ctx.direction}-{ctx.role}")
-            return r
+        async def process_request(self, request: RpcRequest) -> RpcRequest:
+            events.append("A-process_request")
+            return request
+
+        async def process_response(self, request: RpcRequest, response: RpcResponse) -> RpcResponse:
+            events.append("A-process_response")
+            return response
 
     class MwB(AppMiddleware):
-        async def dispatch(self, ctx, call_next):
-            events.append(f"B-enter-{ctx.direction}-{ctx.role}")
-            r = await call_next(ctx)
-            events.append(f"B-exit-{ctx.direction}-{ctx.role}")
-            return r
+        async def process_request(self, request: RpcRequest) -> RpcRequest:
+            events.append("B-process_request")
+            return request
+
+        async def process_response(self, request: RpcRequest, response: RpcResponse) -> RpcResponse:
+            events.append("B-process_response")
+            return response
 
     app.add_middleware(MwA())
     app.add_middleware(MwB())
@@ -140,35 +144,18 @@ async def test_multiple_middleware_order(app: RpcApp):
     result = await app.make("ping").call()
     assert result == "pong"
 
-    # Middleware chain runs independently for each of the 4 phases.
-    # In each phase, A wraps B: A-enter < B-enter < B-exit < A-exit.
-    phases = ["request-client", "request-server", "response-server", "response-client"]
-    assert len(events) == 4 * 4  # 4 phases × 4 events per chain
-    for phase in phases:
-        a_enter = events.index(f"A-enter-{phase}")
-        b_enter = events.index(f"B-enter-{phase}")
-        b_exit = events.index(f"B-exit-{phase}")
-        a_exit = events.index(f"A-exit-{phase}")
-        assert a_enter < b_enter < b_exit < a_exit, f"A should wrap B in {phase}"
-
-
-async def test_middleware_can_set_response(app: RpcApp):
-    class CacheMiddleware(AppMiddleware):
-        async def dispatch(self, ctx, call_next):
-            if ctx.direction == "request" and ctx.role == "server":
-                ctx.response = RpcResponse(id=ctx.request.id, data={"result": "cached"})
-                return ctx
-            return await call_next(ctx)
-
-    app.add_middleware(CacheMiddleware())
-
-    @app.method("ping")
-    def ping() -> str:
-        return "uncached"
-
-    await app.consume()
-    result = await app.make("ping").call()
-    assert result == "cached"
+    # process_request runs A then B for client and server phases.
+    # process_response runs A then B for server and client phases.
+    assert events == [
+        "A-process_request",
+        "B-process_request",
+        "A-process_request",
+        "B-process_request",
+        "A-process_response",
+        "B-process_response",
+        "A-process_response",
+        "B-process_response",
+    ]
 
 
 async def test_middleware_lifecycle():
@@ -177,11 +164,17 @@ async def test_middleware_lifecycle():
             self.init_called = False
             self.close_called = False
 
-        async def init(self, a):
+        async def init(self):
             self.init_called = True
 
         async def close(self):
             self.close_called = True
+
+        async def process_request(self, request):
+            return request
+
+        async def process_response(self, request, response):
+            return response
 
     mw = LifecycleMiddleware()
     transport = MockTransport()
@@ -541,18 +534,22 @@ async def test_wire_middleware_order():
     events: list[str] = []
 
     class MwA(WireMiddleware):
-        async def dispatch(self, ctx, call_next):
-            events.append(f"A-enter-{ctx.direction}-{ctx.role}")
-            r = await call_next(ctx)
-            events.append(f"A-exit-{ctx.direction}-{ctx.role}")
-            return r
+        async def send(self, data, headers, request, response=None):
+            events.append("A-send")
+            return data, headers
+
+        async def receive(self, data, headers, request):
+            events.append("A-receive")
+            return data, headers
 
     class MwB(WireMiddleware):
-        async def dispatch(self, ctx, call_next):
-            events.append(f"B-enter-{ctx.direction}-{ctx.role}")
-            r = await call_next(ctx)
-            events.append(f"B-exit-{ctx.direction}-{ctx.role}")
-            return r
+        async def send(self, data, headers, request, response=None):
+            events.append("B-send")
+            return data, headers
+
+        async def receive(self, data, headers, request):
+            events.append("B-receive")
+            return data, headers
 
     transport = MockTransport()
     app = RpcApp(transport=transport)
@@ -568,62 +565,31 @@ async def test_wire_middleware_order():
     result = await app.make("ping").call()
     assert result == "pong"
 
-    phases = ["request-client", "request-server", "response-server", "response-client"]
-    assert len(events) == 4 * 4
-    for phase in phases:
-        a_enter = events.index(f"A-enter-{phase}")
-        b_enter = events.index(f"B-enter-{phase}")
-        b_exit = events.index(f"B-exit-{phase}")
-        a_exit = events.index(f"A-exit-{phase}")
-        assert a_enter < b_enter < b_exit < a_exit, f"A should wrap B in {phase}"
-
-
-async def test_middleware_can_share_state_via_context():
-    events: list[str] = []
-
-    class StateClientMw(AppMiddleware):
-        async def dispatch(self, ctx, call_next):
-            if ctx.direction == "request" and ctx.role == "client":
-                ctx.state["client_step"] = "seen"
-            result = await call_next(ctx)
-            if ctx.direction == "response" and ctx.role == "client":
-                events.append(ctx.state.get("client_step", ""))
-            return result
-
-    class StateServerMw(AppMiddleware):
-        async def dispatch(self, ctx, call_next):
-            if ctx.direction == "request" and ctx.role == "server":
-                ctx.state["server_step"] = "seen"
-            result = await call_next(ctx)
-            if ctx.direction == "response" and ctx.role == "server":
-                events.append(ctx.state.get("server_step", ""))
-            return result
-
-    transport = MockTransport()
-    app = RpcApp(transport=transport)
-    app.add_middleware(StateClientMw())
-    app.add_middleware(StateServerMw())
-    await app.init()
-
-    @app.method("ping")
-    def ping() -> str:
-        return "pong"
-
-    await app.consume()
-    result = await app.make("ping").call()
-    assert result == "pong"
-    assert events.count("seen") == 2
+    # send runs A then B for client request and server response.
+    # receive runs A then B for server request and client response.
+    assert events == [
+        "A-send",
+        "B-send",
+        "A-receive",
+        "B-receive",
+        "A-send",
+        "B-send",
+        "A-receive",
+        "B-receive",
+    ]
 
 
 async def test_wire_headers_roundtrip():
+    received_headers: list[dict[str, str]] = []
+
     class HeaderInjector(WireMiddleware):
-        async def dispatch(self, ctx, call_next):
-            if ctx.direction == "request" and ctx.role == "client":
-                ctx.wire_headers["x-custom"] = "test-value"
-            elif ctx.direction == "request" and ctx.role == "server":
-                ctx.state["received_headers"] = dict(ctx.wire_headers)
-            result = await call_next(ctx)
-            return result
+        async def send(self, data, headers, request, response=None):
+            headers["x-custom"] = "test-value"
+            return data, headers
+
+        async def receive(self, data, headers, request):
+            received_headers.append(dict(headers))
+            return data, headers
 
     transport = MockTransport()
     app = RpcApp(transport=transport)
@@ -637,6 +603,7 @@ async def test_wire_headers_roundtrip():
     await app.consume()
     result = await app.make("ping").call()
     assert result == "pong"
+    assert received_headers[0].get("x-custom") == "test-value"
 
 
 async def test_validate_types_complex():
@@ -697,24 +664,20 @@ async def test_publish_sends_timeout_from_default():
 
 
 async def test_custom_wire_header_survives_roundtrip():
-    class CustomWireHeaderMw(WireMiddleware):
-        async def dispatch(self, ctx, call_next):
-            if ctx.direction == "request" and ctx.role == "client":
-                ctx.wire_headers["x-custom"] = "hello"
-            elif ctx.direction == "request" and ctx.role == "server":
-                ctx.state["server_seen"] = ctx.wire_headers.get("x-custom", "")
-            return await call_next(ctx)
+    server_seen: list[str] = []
 
-    class StateReader(AppMiddleware):
-        async def dispatch(self, ctx, call_next):
-            if ctx.direction == "response" and ctx.role == "client":
-                ctx.state["check"] = ctx.request.data
-            return await call_next(ctx)
+    class CustomWireHeaderMw(WireMiddleware):
+        async def send(self, data, headers, request, response=None):
+            headers["x-custom"] = "hello"
+            return data, headers
+
+        async def receive(self, data, headers, request):
+            server_seen.append(headers.get("x-custom", ""))
+            return data, headers
 
     transport = MockTransport()
     app = RpcApp(transport=transport)
     app.add_middleware(CustomWireHeaderMw())
-    app.add_middleware(StateReader())
     await app.init()
 
     @app.method("ping")
@@ -724,3 +687,4 @@ async def test_custom_wire_header_survives_roundtrip():
     await app.consume()
     result = await app.make("ping").call()
     assert result == "pong"
+    assert server_seen[0] == "hello"

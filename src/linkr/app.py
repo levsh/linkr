@@ -13,18 +13,13 @@ from pydantic import ValidationError as _PydanticValidationError
 from linkr.di import Depends, DiContainer
 from linkr.exceptions import RpcError
 from linkr.middleware.base import AppMiddleware, WireMiddleware
-from linkr.models import HandlerInfo, RpcContext, RpcRequest, RpcResponse
+from linkr.models import HandlerInfo, RpcRequest, RpcResponse
 from linkr.serializer import JsonSerializer, Serializer
 from linkr.transports import Transport
 
 
 class RpcCall:
-    """
-    Builder for executing a prepared RPC request.
-
-    Returned by RpcApp.make(). Wraps a request and its origin app,
-    providing call() / __call__() convenience methods.
-    """
+    """Builder for executing a prepared RPC request."""
 
     def __init__(self, app: RpcApp, request: RpcRequest) -> None:
         self._app = app
@@ -157,9 +152,9 @@ class RpcApp:
     async def init(self) -> None:
         await self._transport.init()
         for amw in self._app_mw:
-            await amw.init(self)
+            await amw.init()
         for wmw in self._wire_mw:
-            await wmw.init(self)
+            await wmw.init()
 
     async def close(self) -> None:
         await self.stop_consume()
@@ -210,32 +205,30 @@ class RpcApp:
         if rttl is not None:
             request.headers["rttl"] = rttl
 
-        ctx = RpcContext(app=self, direction="request", role="client", request=request)
-        ctx = await self._run_app_mw(ctx)
+        for amw in self._app_mw:
+            request = await amw.process_request(request)
 
         body, wire = self._serializer.dumps_request(request)
-        ctx.body = body
-        ctx.wire_headers.update(wire)
 
-        ctx.state["call_kwds"] = kwds
-        ctx = await self._run_wire_mw(ctx)
+        for wmw in self._wire_mw:
+            body, wire = await wmw.send(body, wire, request)
 
         response_bytes, response_wire = await self._transport.request(
-            ctx.body,
+            body,
             original=request,
-            wire_headers=dict(ctx.wire_headers) or None,
+            wire_headers=wire or None,
         )
 
-        ctx.direction = "response"
-        ctx.body = response_bytes
-        ctx.wire_headers = response_wire or {}
-        ctx = await self._run_wire_mw(ctx)
+        body = response_bytes
+        wire = response_wire or {}
 
-        response = self._serializer.loads_response(ctx.body, dict(ctx.wire_headers))
+        for wmw in self._wire_mw:
+            body, wire = await wmw.receive(body, wire, request)
 
-        ctx.direction = "response"
-        ctx.response = response
-        ctx = await self._run_app_mw(ctx)
+        response = self._serializer.loads_response(body, wire)
+
+        for amw in self._app_mw:
+            response = await amw.process_response(request, response)
 
         if response.data and "error_code" in response.data:
             raise RpcError(
@@ -271,17 +264,15 @@ class RpcApp:
         if rttl is not None:
             request.headers["rttl"] = rttl
 
-        ctx = RpcContext(app=self, direction="request", role="client", request=request)
-        ctx = await self._run_app_mw(ctx)
+        for amw in self._app_mw:
+            request = await amw.process_request(request)
 
         body, wire = self._serializer.dumps_request(request)
-        ctx.body = body
-        ctx.wire_headers.update(wire)
 
-        ctx.state["call_kwds"] = kwds
-        ctx = await self._run_wire_mw(ctx)
+        for wmw in self._wire_mw:
+            body, wire = await wmw.send(body, wire, request)
 
-        await self._transport.publish(ctx.body, original=request, wire_headers=dict(ctx.wire_headers) or None)
+        await self._transport.publish(body, original=request, wire_headers=wire or None)
 
     async def _request_handler(
         self,
@@ -289,42 +280,35 @@ class RpcApp:
         original: RpcRequest,
         wire_headers: dict[str, str] | None = None,
     ) -> tuple[bytes, RpcResponse | None, dict[str, str]] | None:
-        ctx = RpcContext(
-            app=self,
-            direction="request",
-            role="server",
-            request=original,
-            body=data,
-            wire_headers=wire_headers or {},
-        )
-        ctx = await self._run_wire_mw(ctx)
+        body = data
+        headers = wire_headers or {}
 
-        request = self._serializer.loads_request(ctx.body, dict(ctx.wire_headers))
-        ctx.request = request
+        for wmw in self._wire_mw:
+            body, headers = await wmw.receive(body, headers, original)
 
-        ctx = await self._run_app_mw(ctx)
+        request = self._serializer.loads_request(body, headers)
 
-        if ctx.response is None:
-            ctx.response = await self._dispatch(request)
+        for amw in self._app_mw:
+            request = await amw.process_request(request)
 
-        rttl = request.headers.get("rttl")
-        if rttl is not None and ctx.response is not None:
-            ctx.response.headers["rttl"] = rttl
+        response = await self._dispatch(request)
 
-        if ctx.response is None:
+        if response is None:
             return None
 
-        ctx.direction = "response"
-        ctx = await self._run_app_mw(ctx)
+        rttl = request.headers.get("rttl")
+        if rttl is not None:
+            response.headers["rttl"] = rttl
 
-        ctx.wire_headers = {}
-        body, wire = self._serializer.dumps_response(ctx.response)  # type: ignore[arg-type]
-        ctx.body = body
-        ctx.wire_headers.update(wire)
+        for amw in self._app_mw:
+            response = await amw.process_response(request, response)
 
-        ctx = await self._run_wire_mw(ctx)
+        body, wire = self._serializer.dumps_response(response)
 
-        return (ctx.body, ctx.response, dict(ctx.wire_headers))
+        for wmw in self._wire_mw:
+            body, wire = await wmw.send(body, wire, request, response)
+
+        return (body, response, wire)
 
     def _validate_args(
         self, info: HandlerInfo, args: tuple[Any, ...], kwds: dict[str, Any], request: RpcRequest
@@ -425,34 +409,6 @@ class RpcApp:
                     "error_details": {"exc_type": type(exc).__name__},
                 },
             )
-
-    async def _run_app_mw(self, ctx: RpcContext) -> RpcContext:
-
-        async def runner(idx: int, c: RpcContext) -> RpcContext:
-            if idx >= len(self._app_mw):
-                return c
-            mw = self._app_mw[idx]
-
-            async def call_next(inner_ctx: RpcContext) -> RpcContext:
-                return await runner(idx + 1, inner_ctx)
-
-            return await mw.dispatch(c, call_next)
-
-        return await runner(0, ctx)
-
-    async def _run_wire_mw(self, ctx: RpcContext) -> RpcContext:
-
-        async def runner(idx: int, c: RpcContext) -> RpcContext:
-            if idx >= len(self._wire_mw):
-                return c
-            mw = self._wire_mw[idx]
-
-            async def call_next(inner_ctx: RpcContext) -> RpcContext:
-                return await runner(idx + 1, inner_ctx)
-
-            return await mw.dispatch(c, call_next)
-
-        return await runner(0, ctx)
 
     async def __aenter__(self) -> RpcApp:
         await self.init()

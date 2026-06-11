@@ -5,7 +5,7 @@ from uuid import UUID
 import pytest
 from pydantic import ValidationError
 
-from linkr.models import RpcContext, RpcRequest, RpcResponse
+from linkr.models import RpcRequest, RpcResponse
 
 
 def test_rpc_request_defaults():
@@ -61,35 +61,3 @@ def test_rpc_response_invalid_id():
     with pytest.raises(ValidationError):
         RpcResponse(id="not-a-uuid")  # type: ignore[arg-type]
 
-
-def test_rpc_context_defaults():
-    req = RpcRequest()
-    ctx = RpcContext(
-        app=None,  # type: ignore[arg-types]
-        direction="request",
-        role="client",
-        request=req,
-    )
-    assert ctx.direction == "request"
-    assert ctx.role == "client"
-    assert ctx.request is req
-    assert ctx.response is None
-    assert ctx.body == b""
-    assert ctx.state == {}
-
-
-def test_rpc_context_with_all_fields():
-    req = RpcRequest(data={"text": "hello"})
-    resp = RpcResponse(id=req.id, data={"result": "world"})
-    ctx = RpcContext(
-        app="test",  # type: ignore[arg-types]
-        direction="response",
-        role="server",
-        request=req,
-        response=resp,
-        body=b"raw",
-        state={"key": "val"},
-    )
-    assert ctx.response.data == {"result": "world"}
-    assert ctx.body == b"raw"
-    assert ctx.state["key"] == "val"

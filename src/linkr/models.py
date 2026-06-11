@@ -2,16 +2,10 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
-
-if TYPE_CHECKING:
-    from linkr.app import RpcApp
-
-RpcData = dict[str, Any]
-RpcHeaders = dict[str, Any]
 
 
 class RpcRequest(BaseModel):
@@ -25,8 +19,8 @@ class RpcRequest(BaseModel):
     """
 
     id: UUID = Field(default_factory=uuid4)
-    headers: RpcHeaders = Field(default_factory=dict)
-    data: RpcData | None = None
+    headers: dict[str, Any] = Field(default_factory=dict)
+    data: dict[str, Any] | None = None
 
 
 class RpcResponse(BaseModel):
@@ -40,8 +34,8 @@ class RpcResponse(BaseModel):
     """
 
     id: UUID
-    headers: RpcHeaders = Field(default_factory=dict)
-    data: RpcData | None = None
+    headers: dict[str, Any] = Field(default_factory=dict)
+    data: dict[str, Any] | None = None
 
 
 @dataclass
@@ -63,29 +57,3 @@ class HandlerInfo:
     signature: str
     options: dict[str, Any] = field(default_factory=dict)
     dep_types: dict[str, type] = field(default_factory=dict)
-
-
-@dataclass
-class RpcContext:
-    """
-    Mutable context passed through the middleware chain.
-
-    Attributes:
-        app: The RpcApp instance.
-        direction: Whether this is a request or response phase.
-        role: Whether the current side is client or server.
-        request: The incoming/outgoing RpcRequest.
-        response: Optional RpcResponse set by middleware.
-        body: Raw message bytes, populated by the transport.
-        wire_headers: Wire-level metadata (e.g. content_encoding).
-        state: Arbitrary key-value store shared across middleware.
-    """
-
-    app: RpcApp | Any
-    direction: Literal["request", "response"]
-    role: Literal["client", "server"]
-    request: RpcRequest
-    response: RpcResponse | None = None
-    body: bytes = b""
-    wire_headers: dict[str, str] = field(default_factory=dict)
-    state: dict[str, Any] = field(default_factory=dict)
