@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
+from abc import ABC
+from collections.abc import Awaitable, Callable
 from typing import Any
 
-from linkr.models import RpcRequest, RpcResponse
+from ..models import RawMessage, RpcRequest, RpcResponse
 
 
 class BaseMiddleware(ABC):
@@ -33,46 +34,60 @@ class AppMiddleware(BaseMiddleware):
     """
     Middleware that works with deserialised request/response objects.
 
-    App-level middleware operates on the parsed :class:`RpcRequest` and
-    :class:`RpcResponse` so it has full access to the message content
-    without needing to deal with serialization.
+    App-level middleware uses the onion (dispatch) pattern so it can
+    perform pre- and post-processing around the inner handler using
+    local variables.
+
+    Subclasses should override :meth:`dispatch_client` and/or
+    :meth:`dispatch_server` to transform requests and responses.
     """
 
-    @abstractmethod
-    async def process_request(self, request: RpcRequest, **kwds: Any) -> RpcRequest:
+    async def dispatch_client(
+        self,
+        call_next: Callable[[], Awaitable[RpcResponse | None]],
+        request: RpcRequest,
+        *,
+        kwds: dict[str, Any] | None = None,
+    ) -> RpcResponse | None:
         """
-        Process a request before it reaches the handler.
+        Wrap a client-side RPC call.
 
-        Called twice for every synchronous call:
-        once on the client side (after serialization) and once on the
-        server side (before dispatch). Raise an exception to abort
-        processing.
+        Override this method to perform actions before and/or after
+        the rest of the client pipeline (serialize → wire-level
+        dispatch_client → transport → deserialize). Call
+        ``await call_next()`` to invoke the next layer.
 
         Args:
-            request: The incoming or outgoing RPC request.
-            **kwds: Additional call context forwarded from the caller.
+            call_next: The next layer in the middleware chain.
+            request: The outgoing RPC request.
+            kwds: Additional call context forwarded from the caller.
 
         Returns:
-            The (possibly modified) request.
+            The RPC response, or ``None`` for fire-and-forget.
         """
+        return await call_next()
 
-    @abstractmethod
-    async def process_response(self, request: RpcRequest, response: RpcResponse, **kwds: Any) -> RpcResponse:
+    async def dispatch_server(
+        self,
+        call_next: Callable[[], Awaitable[RpcResponse | None]],
+        request: RpcRequest,
+        *,
+        kwds: dict[str, Any] | None = None,
+    ) -> RpcResponse | None:
         """
-        Process a response after the handler has run.
+        Wrap a server-side request handler.
 
-        Called twice for every synchronous call:
-        once on the server side (after dispatch) and once on the client
-        side (before returning to the caller).
+        Override this method to perform actions before and/or after
+        the handler is dispatched. Call ``await call_next()`` to
+        invoke the next layer.
 
         Args:
-            request: The original RPC request (read-only).
-            response: The outgoing or incoming RPC response.
-            **kwds: Additional call context forwarded from the caller.
-
+            call_next: The next layer in the middleware chain.
+            request: The incoming RPC request.
         Returns:
-            The (possibly modified) response.
+            The RPC response, or ``None`` if no response is sent.
         """
+        return await call_next()
 
 
 class WireMiddleware(BaseMiddleware):
@@ -82,54 +97,66 @@ class WireMiddleware(BaseMiddleware):
     Wire-level middleware operates on the serialised byte payload and
     wire-level metadata headers. This is suitable for compression,
     encryption, or custom encoding layers.
+
+    Subclasses should override :meth:`dispatch_client` and/or
+    :meth:`dispatch_server` to transform data using the onion pattern.
+    Mutate ``request_raw_message.data`` / ``request_raw_message.headers``
+    in place before calling ``call_next()`` to affect the outgoing data.
+    The response (if any) can be similarly mutated after ``call_next()``
+    returns.
     """
 
-    async def send(
+    async def dispatch_client(
         self,
-        data: bytes,
-        headers: dict[str, str],
+        call_next: Callable[[], Awaitable[RawMessage | None]],
+        request_raw_message: RawMessage,
         request: RpcRequest,
-        response: RpcResponse | None = None,
-        **kwds: Any,
-    ) -> tuple[bytes, dict[str, str]]:
+        *,
+        kwds: dict[str, Any] | None = None,
+    ) -> RawMessage | None:
         """
-        Transform data being sent TO the transport.
+        Wrap a client-side RPC call (request → transport → response).
 
-        Called for both client requests (before transport send) and
-        server responses (before transport send back to client).
+        Override this method to transform the outgoing request bytes
+        (by mutating *request_raw_message*) before ``await call_next()``,
+        and/or transform the incoming response bytes (by mutating the
+        returned :class:`RawMessage`) after ``await call_next()``.
 
         Args:
-            data: The raw payload bytes.
-            headers: Wire-level headers (e.g. content_type, content_encoding).
-            request: The original RPC request.
-            response: The RPC response, if available (``None`` for request path).
-            **kwds: Additional call context forwarded from the caller.
+            call_next: The next layer in the wire middleware chain.
+            request_raw_message: The serialised request (mutate in place).
+            request: The original RPC request object.
+            kwds: Additional call context forwarded from the caller.
 
         Returns:
-            The (possibly modified) ``(data, headers)`` tuple.
+            The (possibly modified) response :class:`RawMessage`,
+            or ``None`` for fire-and-forget.
         """
-        return data, headers
+        return await call_next()
 
-    async def receive(
+    async def dispatch_server(
         self,
-        data: bytes,
-        headers: dict[str, str],
-        request: RpcRequest,
-        **kwds: Any,
-    ) -> tuple[bytes, dict[str, str]]:
+        call_next: Callable[[], Awaitable[tuple[RawMessage, RpcResponse] | tuple[None, None]]],
+        request_raw_message: RawMessage,
+        *,
+        kwds: dict[str, Any] | None = None,
+    ) -> tuple[RawMessage, RpcResponse] | tuple[None, None]:
         """
-        Transform data received FROM the transport.
+        Wrap a server-side request handler (request → dispatch → response).
 
-        Called for both server requests (after transport receive) and
-        client responses (after transport receive).
+        Override this method to transform the incoming request bytes
+        (by mutating *request_raw_message*) before ``await call_next()``,
+        and/or transform the outgoing response bytes (by mutating the
+        returned :class:`RawMessage`) after ``await call_next()``.
 
         Args:
-            data: The raw payload bytes.
-            headers: Wire-level headers (e.g. content_type, content_encoding).
-            request: The original RPC request.
-            **kwds: Additional call context forwarded from the caller.
+            call_next: The next layer in the wire middleware chain.
+            request_raw_message: The serialised incoming request
+                (mutate in place).
 
         Returns:
-            The (possibly modified) ``(data, headers)`` tuple.
+            A ``(raw_response, response)`` tuple where *raw_response* is
+            the serialised response bytes and *response* is the
+            deserialised :class:`RpcResponse`.
         """
-        return data, headers
+        return await call_next()

@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import gzip
+from collections.abc import Awaitable, Callable
 from typing import Any
 
-from linkr.middleware.base import WireMiddleware
-from linkr.models import RpcRequest, RpcResponse
+from ..models import RawMessage, RpcRequest, RpcResponse
+from .base import WireMiddleware
 
 
-def _merge_ce(headers: dict[str, str], name: str) -> None:
+def _merge_ce(headers: dict[str, Any], name: str) -> None:
     existing = headers.get("content_encoding", "")
     headers["content_encoding"] = f"{existing},{name}" if existing else name
 
@@ -29,57 +30,57 @@ class GzipMiddleware(WireMiddleware):
         """
         self._min_size = min_size
 
-    async def send(
+    async def dispatch_client(
         self,
-        data: bytes,
-        headers: dict[str, str],
+        call_next: Callable[[], Awaitable[RawMessage | None]],
+        request_raw_message: RawMessage,
         request: RpcRequest,
-        response: RpcResponse | None = None,
-        **kwds: Any,
-    ) -> tuple[bytes, dict[str, str]]:
+        *,
+        kwds: dict[str, Any] | None = None,
+    ) -> RawMessage | None:
         """
-        Compress data with gzip if its size is at least *min_size*.
+        Compress outgoing request, decompress incoming response.
 
-        If compressed, the ``content_encoding`` header is set or extended
-        with ``"gzip"``.
-
-        Args:
-            data: Raw payload bytes.
-            headers: Wire-level headers (mutated in-place if compressed).
-            request: The original RPC request.
-            response: The RPC response, if available (``None`` for request path).
-            **kwds: Additional call context forwarded from the caller.
-
-        Returns:
-            The (possibly compressed) ``(data, headers)`` tuple.
+        Mutates *request_raw_message* in place before calling the next layer,
+        and mutates the returned response :class:`RawMessage` in place
+        before returning.
         """
-        if len(data) >= self._min_size:
-            data = gzip.compress(data)
-            _merge_ce(headers, "gzip")
-        return data, headers
+        if len(request_raw_message.data) >= self._min_size:
+            request_raw_message.data = gzip.compress(request_raw_message.data)
+            _merge_ce(request_raw_message.headers, "gzip")
 
-    async def receive(
+        raw_response = await call_next()
+
+        if raw_response is not None and "gzip" in raw_response.headers.get("content_encoding", ""):
+            raw_response.data = gzip.decompress(raw_response.data)
+
+        return raw_response
+
+    async def dispatch_server(
         self,
-        data: bytes,
-        headers: dict[str, str],
-        request: RpcRequest,
-        **kwds: Any,
-    ) -> tuple[bytes, dict[str, str]]:
+        call_next: Callable[[], Awaitable[tuple[RawMessage, RpcResponse] | tuple[None, None]]],
+        request_raw_message: RawMessage,
+        *,
+        kwds: dict[str, Any] | None = None,
+    ) -> tuple[RawMessage, RpcResponse] | tuple[None, None]:
         """
-        Decompress gzip-encoded data.
+        Decompress incoming request, compress outgoing response.
 
-        Only decompresses when the ``content_encoding`` header
-        contains ``"gzip"``.
-
-        Args:
-            data: Possibly compressed payload bytes.
-            headers: Wire-level headers (checked for ``content_encoding``).
-            request: The original RPC request.
-            **kwds: Additional call context forwarded from the caller.
-
-        Returns:
-            The (possibly decompressed) ``(data, headers)`` tuple.
+        Mutates *request_raw_message* in place before calling the next layer,
+        and mutates the returned response :class:`RawMessage` in place
+        before returning.
         """
-        if "gzip" in headers.get("content_encoding", ""):
-            data = gzip.decompress(data)
-        return data, headers
+        if "gzip" in request_raw_message.headers.get("content_encoding", ""):
+            request_raw_message.data = gzip.decompress(request_raw_message.data)
+
+        result = await call_next()
+
+        if result is None or result[0] is None:
+            return None, None
+
+        raw_response, response = result
+        if len(raw_response.data) >= self._min_size:
+            raw_response.data = gzip.compress(raw_response.data)
+            _merge_ce(raw_response.headers, "gzip")
+
+        return raw_response, response

@@ -3,6 +3,13 @@ from __future__ import annotations
 from typing import Any
 
 
+class ErrorCode:
+    INTERNAL_ERROR = "InternalError"
+    METHOD_NOT_FOUND = "MethodNotFound"
+    TIMEOUT = "Timeout"
+    VALIDATION_ERROR = "ValidationError"
+
+
 class RpcError(Exception):
     """
     Structured RPC error returned by the server.
@@ -18,7 +25,7 @@ class RpcError(Exception):
 
     def __init__(
         self,
-        error_code: str = "InternalError",
+        error_code: str = ErrorCode.INTERNAL_ERROR,
         error_message: str = "",
         error_details: dict[str, Any] | None = None,
     ) -> None:

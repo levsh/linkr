@@ -7,8 +7,8 @@ from os import path
 import pytest
 import rmqaio
 from docker.errors import DockerException
-from linkr import MockTransport, RpcApp
 
+from linkr import MockTransport, RpcApp
 from tests import utils
 
 

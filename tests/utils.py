@@ -32,7 +32,7 @@ class ContainerExecutor:
     def create(self, image, **kwds):
         container_kwds = self.kwds.copy()
         container_kwds.update(kwds)
-        container = self.client.containers.create(image, **container_kwds)
+        container = self.client.containers.create(image, **container_kwds)  # type: ignore[arg-type]
         try:
             yield container
         except Exception:

@@ -4,12 +4,13 @@ import asyncio
 import logging
 import uuid
 from collections.abc import Awaitable, Callable, Coroutine
+from contextlib import suppress
 from typing import Any, TypeVar
 
 from rmqaio import BindSpec, ConsumerSpec, ExchangeSpec, Ops, QueueSpec, Repeat, RetryPolicy, SharedConnection
 
-from linkr.models import RpcRequest, RpcResponse
-from linkr.transports import Transport
+from ..models import RawMessage, RpcRequest
+from . import Transport
 
 logger = logging.getLogger("linkr")
 
@@ -22,7 +23,7 @@ DEFAULT_OPEN_RETRY_DELAYS = (1, 3, 5)
 DEFAULT_REOPEN_RETRY_DELAYS = Repeat(5)
 DEFAULT_OPS_TIMEOUT = 30.0
 
-DEFAULT_SERVER_QUEUE_NAME = "rpc.server"
+DEFAULT_SERVER_QUEUE_NAME = "rpc"
 DEFAULT_SERVER_QUEUE_DURABLE = False
 DEFAULT_SERVER_QUEUE_EXCLUSIVE = True
 
@@ -65,7 +66,7 @@ class RmqTransport(Transport):
             exchange_durable: Whether the exchange survives broker restarts.
                 Defaults to ``True``.
             server_queue_name: Name of the main server queue.
-                Defaults to ``"rpc.server"``.
+                Defaults to ``"rpc"``.
             server_queue_durable: Whether the server queue survives broker restarts.
                 Defaults to ``False``.
             server_queue_exclusive: Whether the server queue is exclusive to
@@ -109,11 +110,11 @@ class RmqTransport(Transport):
             exclusive=reply_queue_exclusive,
         )
 
-        self._pending: dict[str, asyncio.Future[tuple[bytes, dict[str, str]]]] = {}
+        self._pending: dict[str, asyncio.Future[RawMessage]] = {}
         self._handler: (
             Callable[
-                [bytes, RpcRequest, dict[str, str] | None],
-                Awaitable[tuple[bytes, RpcResponse | None, dict[str, str]] | None],
+                [RawMessage],
+                Awaitable[RawMessage | None],
             ]
             | None
         ) = None
@@ -123,20 +124,20 @@ class RmqTransport(Transport):
         self,
         reply_to: str,
         correlation_id: str,
-        data: bytes,
-        wire_headers: dict[str, str] | None = None,
+        message: RawMessage,
     ) -> None:
         props: dict[str, Any] = {
             "correlation_id": correlation_id,
         }
-        if wire_headers:
-            if "content_type" in wire_headers:
-                props["content_type"] = wire_headers["content_type"]
-            if "content_encoding" in wire_headers:
-                props["content_encoding"] = wire_headers["content_encoding"]
+        if message.headers:
+            if "content_type" in message.headers:
+                props["content_type"] = message.headers["content_type"]
+            if "content_encoding" in message.headers:
+                props["content_encoding"] = message.headers["content_encoding"]
+            props["headers"] = message.headers
         await self._ops.publish(
             exchange="",
-            data=data,
+            data=message.data,
             routing_key=reply_to,
             properties=props,
         )
@@ -144,48 +145,34 @@ class RmqTransport(Transport):
     async def _on_reply(self, channel: Any, message: Any) -> None:
         correlation_id = message.header.properties.correlation_id
         if correlation_id and correlation_id in self._pending:
-            ce = getattr(message.header.properties, "content_encoding", None)
-            wire = {"content_encoding": ce} if ce else {}
+            wire = getattr(message.header.properties, "headers", None) or {}
             fut = self._pending.pop(correlation_id)
             if not fut.done():
-                fut.set_result((message.body, wire))
+                fut.set_result(RawMessage(data=message.body, headers=wire))
 
     async def _on_request(self, channel: Any, message: Any) -> None:
         if self._handler is None:
             return
 
-        reply_to = message.header.properties.reply_to
-        if not reply_to:
-            return
-
-        cid = message.header.properties.correlation_id or ""
-        if cid:
-            original = RpcRequest(id=uuid.UUID(cid), headers={})
-        else:
-            original = RpcRequest(headers={})
-
-        ce = getattr(message.header.properties, "content_encoding", None)
-        wire_headers = {"content_encoding": ce} if ce else None
-
         try:
-            result = await self._handler(message.body, original, wire_headers)
-        except Exception:
-            logger.exception("Handler error for %s", cid)
-            error_resp = RpcResponse(
-                id=original.id,
-                data={
-                    "error_code": "InternalError",
-                    "error_message": "Handler execution failed",
-                },
-            )
-            await self._send(reply_to, cid or str(original.id), error_resp.model_dump_json().encode())
-            return
+            request_id = message.header.properties.correlation_id or ""
+            if not request_id:
+                return
 
-        if result is None:
-            return
+            wire_headers = getattr(message.header.properties, "headers", None) or {}
+            raw_request = RawMessage(data=message.body, headers=wire_headers)
 
-        response_bytes, response, response_wire = result
-        await self._send(reply_to, cid or str(response.id), response_bytes, wire_headers=response_wire)  # type: ignore[union-attr]
+            reply_to = message.header.properties.reply_to
+
+            result = await self._handler(raw_request)
+
+            if result is None:
+                return
+
+            await self._send(reply_to, request_id, result)
+
+        except Exception as e:
+            logger.exception(e)
 
     async def init(self) -> None:
         """
@@ -219,25 +206,46 @@ class RmqTransport(Transport):
             restore=True,
         )
 
-    async def close(self) -> None:
+    async def close(self, timeout: float | None = None) -> None:
         """
         Shut down the transport.
 
         Stops all consumers, cancels any pending request futures, and
         closes the underlying RabbitMQ connection.
+
+        Args:
+            timeout: If set, ``close`` waits at most this many total
+                seconds across all steps.  Each step gets the remaining
+                budget; ``TimeoutError`` is caught and suppressed so
+                shutdown proceeds as far as possible.
         """
-        await self._ops.stop_consume()
-        for fut in self._pending.values():
-            if not fut.done():
-                fut.cancel()
-        self._pending.clear()
-        await self._conn.close()
+        deadline = None if timeout is None else asyncio.get_running_loop().time() + timeout
+
+        def _left() -> float | None:
+            if deadline is None:
+                return None
+            return max(deadline - asyncio.get_running_loop().time(), 0.1)
+
+        with suppress(asyncio.TimeoutError):
+            await self._ops.stop_consume(timeout=_left())
+
+        with suppress(asyncio.TimeoutError):
+            if self._pending:
+                done, pending = await asyncio.wait(
+                    list(self._pending.values()), timeout=_left()
+                )
+                for fut in pending:
+                    fut.cancel()
+            self._pending.clear()
+
+        with suppress(asyncio.TimeoutError):
+            await self._conn.close(timeout=_left())
 
     async def consume(
         self,
         handler: Callable[
-            [bytes, RpcRequest, dict[str, str] | None],
-            Awaitable[tuple[bytes, RpcResponse | None, dict[str, str]] | None],
+            [RawMessage],
+            Awaitable[RawMessage | None],
         ],
         queue: str | None = None,
     ) -> None:
@@ -245,16 +253,17 @@ class RmqTransport(Transport):
         Register a request handler and start consuming from a queue.
 
         If *queue* is ``None``, the main server queue is used. If a
-        group name is provided, a separate queue named
-        ``{server_queue_name}.{group}`` is declared, bound, and consumed.
+        routing prefix is provided, a separate queue named
+        ``{server_queue_name}.{queue}`` is declared, bound, and consumed.
 
         Args:
-            handler: Async callable that receives
-                ``(request_bytes, original_request, wire_headers)`` and
-                returns ``(response_bytes, original_response, response_wire_headers)``
-                or ``None`` for fire-and-forget.
-            queue: Optional group name for segmented routing (e.g.
-                ``"api"`` creates queue ``"rpc.server.api"``).
+            handler: Async callable that receives a :class:`RawMessage`
+                and returns a :class:`RawMessage` or ``None`` for
+                fire-and-forget.
+            queue: Optional routing prefix for segmented consumption.
+                For example, if ``server_queue_name`` is ``"rpc"``
+                and *queue* is ``"api"``, the queue will be named
+                ``"rpc.api"``.
         """
         self._handler = handler
 
@@ -301,7 +310,9 @@ class RmqTransport(Transport):
         self._handler = None
 
     def _resolve_routing_key(self, message: RpcRequest) -> str:
-        return message.headers.get("routing_key", self._server_queue_spec.name)
+        if message.headers.get("queue"):
+            return f"{self._server_queue_spec.name}.{message.headers['queue']}"
+        return self._server_queue_spec.name
 
     def _build_properties(
         self,
@@ -325,16 +336,16 @@ class RmqTransport(Transport):
                 properties["content_type"] = wire_headers["content_type"]
             if "content_encoding" in wire_headers:
                 properties["content_encoding"] = wire_headers["content_encoding"]
+            properties["headers"] = wire_headers
 
         return properties
 
     async def publish(
         self,
-        data: bytes,
+        request: RpcRequest,
+        message: RawMessage,
         *,
-        original: RpcRequest,
-        wire_headers: dict[str, Any] | None = None,
-        **kwds: Any,
+        kwds: dict[str, Any] | None = None,
     ) -> None:
         """
         Publish a fire-and-forget message to the exchange.
@@ -343,30 +354,27 @@ class RmqTransport(Transport):
         ``routing_key`` stored in the original request headers.
 
         Args:
-            data: Serialised request bytes.
-            original: The original RPC request (used for routing and
+            request: The original RPC request (used for routing and
                 header extraction).
-            wire_headers: Additional wire-level headers (content_type,
-                content_encoding, etc.).
-            **kwds: Ignored. Present for interface compatibility.
+            message: The serialised request as a :class:`RawMessage`.
+            kwds: Additional call context forwarded from the caller.
         """
-        routing_key = self._resolve_routing_key(original)
-        properties = self._build_properties(original, wire_headers=wire_headers)
+        routing_key = self._resolve_routing_key(request)
+        properties = self._build_properties(request, wire_headers=message.headers)
         await self._ops.publish(
             self._exchange_spec.name,
-            data,
+            message.data,
             routing_key,
             properties=properties,
         )
 
     async def request(
         self,
-        data: bytes,
+        request: RpcRequest,
+        message: RawMessage,
         *,
-        original: RpcRequest,
-        wire_headers: dict[str, Any] | None = None,
-        **kwds: Any,
-    ) -> tuple[bytes, dict[str, str]]:
+        kwds: dict[str, Any] | None = None,
+    ) -> RawMessage:
         """
         Publish a message and wait for the matching reply.
 
@@ -374,35 +382,33 @@ class RmqTransport(Transport):
         matched by correlation ID on the auto-generated reply queue.
 
         Args:
-            data: Serialised request bytes.
-            original: The original RPC request (used for correlation ID,
+            request: The original RPC request (used for correlation ID,
                 routing, and header extraction).
-            wire_headers: Additional wire-level headers (content_type,
-                content_encoding, etc.).
-            **kwds: Ignored. Present for interface compatibility.
+            message: The serialised request as a :class:`RawMessage`.
+            kwds: Additional call context forwarded from the caller.
 
         Returns:
-            ``(response_bytes, response_wire_headers)``.
+            The response as a :class:`RawMessage`.
 
         Raises:
             asyncio.TimeoutError: If the reply is not received within
                 the operation timeout.
         """
-        correlation_id = str(original.id)
-        fut: asyncio.Future[tuple[bytes, dict[str, str]]] = asyncio.get_running_loop().create_future()
+        correlation_id = str(request.id)
+        fut: asyncio.Future[RawMessage] = asyncio.get_running_loop().create_future()
         self._pending[correlation_id] = fut
 
-        routing_key = self._resolve_routing_key(original)
+        routing_key = self._resolve_routing_key(request)
         properties = self._build_properties(
-            original,
+            request,
             correlation_id=correlation_id,
             reply_to=self._reply_queue_spec.name,
-            wire_headers=wire_headers,
+            wire_headers=message.headers,
         )
 
         await self._ops.publish(
             self._exchange_spec.name,
-            data,
+            message.data,
             routing_key,
             properties=properties,
         )
@@ -444,12 +450,11 @@ class ThreadSafeRmqTransport(RmqTransport):
 
     async def request(
         self,
-        data: bytes,
+        request: RpcRequest,
+        message: RawMessage,
         *,
-        original: RpcRequest,
-        wire_headers: dict[str, Any] | None = None,
-        **kwds: Any,
-    ) -> tuple[bytes, dict[str, str]]:
+        kwds: dict[str, Any] | None = None,
+    ) -> RawMessage:
         """
         Send a request and wait for the reply, safe for cross-loop usage.
 
@@ -457,25 +462,21 @@ class ThreadSafeRmqTransport(RmqTransport):
         :meth:`init`, the call is bridged to the owner loop.
 
         Args:
-            data: Serialised request bytes.
-            original: The original RPC request.
-            wire_headers: Additional wire-level headers.
-            **kwds: Forwarded to :meth:`RmqTransport.request`.
+            request: The original RPC request.
+            message: The serialised request as a :class:`RawMessage`.
+            kwds: Additional call context forwarded from the caller.
 
         Returns:
-            ``(response_bytes, response_wire_headers)``.
+            The response as a :class:`RawMessage`.
         """
-        return await self._bridge(
-            super().request(data, original=original, wire_headers=wire_headers, **kwds),
-        )
+        return await self._bridge(super().request(request, message, kwds=kwds))
 
     async def publish(
         self,
-        data: bytes,
+        request: RpcRequest,
+        message: RawMessage,
         *,
-        original: RpcRequest,
-        wire_headers: dict[str, Any] | None = None,
-        **kwds: Any,
+        kwds: dict[str, Any] | None = None,
     ) -> None:
         """
         Publish a fire-and-forget message, safe for cross-loop usage.
@@ -484,11 +485,8 @@ class ThreadSafeRmqTransport(RmqTransport):
         :meth:`init`, the call is bridged to the owner loop.
 
         Args:
-            data: Serialised request bytes.
-            original: The original RPC request.
-            wire_headers: Additional wire-level headers.
-            **kwds: Forwarded to :meth:`RmqTransport.publish`.
+            request: The original RPC request.
+            message: The serialised request as a :class:`RawMessage`.
+            kwds: Additional call context forwarded from the caller.
         """
-        return await self._bridge(
-            super().publish(data, original=original, wire_headers=wire_headers, **kwds),
-        )
+        return await self._bridge(super().publish(request, message, kwds=kwds))

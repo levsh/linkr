@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from linkr.models import RpcRequest, RpcResponse
+from ..models import RawMessage, RpcRequest
 
 
 class Transport(ABC):
@@ -29,32 +29,36 @@ class Transport(ABC):
         """
 
     @abstractmethod
-    async def close(self) -> None:
+    async def close(self, timeout: float | None = None) -> None:
         """
         Gracefully shut down the transport.
 
         Called during application shutdown. Should release all
         connections and resources.
+
+        Args:
+            timeout: Max seconds to wait for pending operations.
+                ``None`` means wait indefinitely.
         """
 
     @abstractmethod
     async def consume(
         self,
-        handler: Callable[
-            [bytes, RpcRequest, dict[str, str] | None],
-            Awaitable[tuple[bytes, RpcResponse | None, dict[str, str]] | None],
-        ],
+        handler: Callable[[RawMessage], Awaitable[RawMessage | None]],
         queue: str | None = None,
     ) -> None:
         """
         Start consuming incoming RPC requests.
 
         Args:
-            handler: Async callable that receives
-                (request_bytes, original_request, wire_headers) and returns
-                (response_bytes, original_response, response_wire_headers)
-                or None for fire-and-forget.
-            queue: Optional queue name segment for group routing.
+            handler: Async callable that receives a :class:`RawMessage`
+                and returns a :class:`RawMessage` or ``None`` for
+                fire-and-forget.
+            queue: Optional routing prefix. When set, a dedicated queue
+                ``{server_queue_name}.{queue}`` is declared and consumed.
+                Used by :class:`RpcApp` to route method groups based on
+                the method name prefix (e.g. ``"api/user/get"`` routes to
+                queue ``{server_queue_name}.api``).
         """
 
     @abstractmethod
@@ -70,40 +74,36 @@ class Transport(ABC):
     @abstractmethod
     async def publish(
         self,
-        data: bytes,
+        request: RpcRequest,
+        message: RawMessage,
         *,
-        original: RpcRequest,
-        wire_headers: dict[str, Any] | None = None,
-        **kwds: Any,
+        kwds: dict[str, Any] | None = None,
     ) -> None:
         """
         Publish a fire-and-forget RPC request.
 
         Args:
-            data: Serialized and encoded request bytes.
-            original: The original RpcRequest (for routing metadata).
-            wire_headers: Additional wire-level headers (e.g. content-encoding).
-            **kwds: Extra arguments forwarded from :meth:`RpcApp.publish`.
+            request: The original RpcRequest (for routing metadata).
+            message: The serialised request as a :class:`RawMessage`.
+            kwds: Additional call context forwarded from the caller.
         """
 
     @abstractmethod
     async def request(
         self,
-        data: bytes,
+        request: RpcRequest,
+        message: RawMessage,
         *,
-        original: RpcRequest,
-        wire_headers: dict[str, Any] | None = None,
-        **kwds: Any,
-    ) -> tuple[bytes, dict[str, str]]:
+        kwds: dict[str, Any] | None = None,
+    ) -> RawMessage:
         """
         Send an RPC request and wait for a matching response.
 
         Args:
-            data: Serialized and encoded request bytes.
-            original: The original RpcRequest (for routing metadata).
-            wire_headers: Additional wire-level headers.
-            **kwds: Extra arguments forwarded from :meth:`RpcApp.call`.
+            request: The original RpcRequest (for routing metadata).
+            message: The serialised request as a :class:`RawMessage`.
+            kwds: Additional call context forwarded from the caller.
 
         Returns:
-            Tuple of (raw_response_bytes, response_wire_headers).
+            The response as a :class:`RawMessage`.
         """

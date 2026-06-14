@@ -3,10 +3,12 @@ import asyncio
 import pytest
 
 from linkr.app import RpcApp
-from linkr.exceptions import RpcError
+from linkr.exceptions import ErrorCode, RpcError
+from linkr.serializer import JsonRpcSerializer, JsonSerializer
 from linkr.transports.rmq import RmqTransport, ThreadSafeRmqTransport
 
 
+@pytest.mark.integration
 class TestRMQ:
     async def test_base(self, rabbitmq):
         transport = RmqTransport(f"amqp://{rabbitmq['ip']}")
@@ -59,11 +61,12 @@ class TestRMQ:
 
             with pytest.raises(RpcError) as exc_info:
                 await rpc.make("service/add", 1, 2).call(timeout=1)
-            assert exc_info.value.error_code == "Timeout"
+            assert exc_info.value.error_code == ErrorCode.TIMEOUT
         finally:
             await rpc.close()
 
 
+@pytest.mark.integration
 class TestThreadSafeRMQ:
     async def test_request_from_owner_loop(self, rabbitmq):
         transport = ThreadSafeRmqTransport(f"amqp://{rabbitmq['ip']}")
@@ -118,6 +121,7 @@ class TestThreadSafeRMQ:
                 async def publish():
                     req = rpc.make("ping")
                     await rpc.publish(req.request)
+
                 asyncio.run(publish())
 
             loop = asyncio.get_running_loop()
@@ -171,5 +175,87 @@ class TestThreadSafeRMQ:
             )
 
             assert sorted(results) == [f"msg-{i}" for i in range(5)]
+        finally:
+            await rpc.close()
+
+
+@pytest.mark.integration
+class TestJsonRpcOverRMQ:
+    async def test_positional_args(self, rabbitmq):
+        transport = RmqTransport(f"amqp://{rabbitmq['ip']}")
+        rpc = RpcApp(transport, serializer=JsonRpcSerializer())
+
+        @rpc.method("add")
+        def add(a, b):
+            return a + b
+
+        await rpc.init()
+        try:
+            await rpc.consume()
+            result = await rpc.make("add", 2, 3).call()
+            assert result == 5
+        finally:
+            await rpc.close()
+
+    async def test_keyword_args(self, rabbitmq):
+        transport = RmqTransport(f"amqp://{rabbitmq['ip']}")
+        rpc = RpcApp(transport, serializer=JsonRpcSerializer())
+
+        @rpc.method("greet")
+        def greet(name: str) -> str:
+            return f"Hello, {name}!"
+
+        await rpc.init()
+        try:
+            await rpc.consume()
+            result = await rpc.make("greet", name="World").call()
+            assert result == "Hello, World!"
+        finally:
+            await rpc.close()
+
+    async def test_error_method_not_found(self, rabbitmq):
+        transport = RmqTransport(f"amqp://{rabbitmq['ip']}")
+        rpc = RpcApp(transport, serializer=JsonRpcSerializer())
+
+        await rpc.init()
+        try:
+            await rpc.consume()
+            with pytest.raises(RpcError) as exc_info:
+                await rpc.make("nonexistent").call()
+            assert exc_info.value.error_code == ErrorCode.METHOD_NOT_FOUND
+        finally:
+            await rpc.close()
+
+    async def test_error_handler_raises(self, rabbitmq):
+        transport = RmqTransport(f"amqp://{rabbitmq['ip']}")
+        rpc = RpcApp(transport, serializer=JsonRpcSerializer())
+
+        @rpc.method("fail")
+        def fail() -> str:
+            msg = "something went wrong"
+            raise ValueError(msg)
+
+        await rpc.init()
+        try:
+            await rpc.consume()
+            with pytest.raises(RpcError) as exc_info:
+                await rpc.make("fail").call()
+            assert exc_info.value.error_code == ErrorCode.INTERNAL_ERROR
+        finally:
+            await rpc.close()
+
+    async def test_auto_detect(self, rabbitmq):
+        transport = RmqTransport(f"amqp://{rabbitmq['ip']}")
+        rpc = RpcApp(transport, serializer=[JsonRpcSerializer(), JsonSerializer()])
+
+        @rpc.method("ping")
+        def ping() -> str:
+            return "pong"
+
+        await rpc.init()
+        try:
+            await rpc.consume()
+            result = await rpc.make("ping").call(serializer="jsonrpc2.0")
+            assert result == "pong"
         finally:
             await rpc.close()

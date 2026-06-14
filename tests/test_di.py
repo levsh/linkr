@@ -17,121 +17,109 @@ class Config:
         self.env = env
 
 
-def test_depends_marker() -> None:
-    ann: object = Depends[Database]
-    assert get_origin(ann) is Depends
-    assert get_args(ann) == (Database,)
+class TestDiContainer:
+    def test_depends_marker(self) -> None:
+        ann: object = Depends[Database]
+        assert get_origin(ann) is Depends
+        assert get_args(ann) == (Database,)
+
+    def test_singleton(self) -> None:
+        c = DiContainer()
+        c.add_singleton(Database, lambda: Database("postgres://test"))
+        assert c.resolve(Database) is c.resolve(Database)
+
+    def test_transient(self) -> None:
+        c = DiContainer()
+        c.add_transient(Config, lambda: Config("dev"))
+        assert c.resolve(Config) is not c.resolve(Config)
+
+    def test_unknown(self) -> None:
+        c = DiContainer()
+        with pytest.raises(KeyError, match="No dependency registered"):
+            c.resolve(str)
 
 
-def test_di_container_singleton() -> None:
-    c = DiContainer()
-    c.add_singleton(Database, lambda: Database("postgres://test"))
-    assert c.resolve(Database) is c.resolve(Database)
+class TestDiWithApp:
+    @pytest.fixture
+    def transport(self):
+        t = MockTransport()
+        return t
 
+    @pytest.fixture
+    async def app(self, transport):
+        a = RpcApp(transport=transport)
+        await a.init()
+        yield a
+        await a.close()
 
-def test_di_container_transient() -> None:
-    c = DiContainer()
-    c.add_transient(Config, lambda: Config("dev"))
-    assert c.resolve(Config) is not c.resolve(Config)
+    async def test_resolves_singleton(self, app, transport):
+        app.dependencies.add_singleton(Database, lambda: Database("postgres://db"))
 
+        @app.method("ping")
+        def ping(db: Depends[Database]) -> str:
+            return db.url  # type: ignore[attr-defined]
 
-def test_di_container_unknown() -> None:
-    c = DiContainer()
-    with pytest.raises(KeyError, match="No dependency registered"):
-        c.resolve(str)
+        await app.consume()
+        result = await app.make("ping").call()
+        assert result == "postgres://db"
 
+    async def test_with_rpc_args(self, app, transport):
+        app.dependencies.add_singleton(Database, lambda: Database("postgres://db"))
 
-async def test_di_resolves_singleton() -> None:
-    transport = MockTransport()
-    app = RpcApp(transport=transport)
-    app.dependencies.add_singleton(Database, lambda: Database("postgres://db"))
-    await app.init()
+        @app.method("greet")
+        def greet(name: str, db: Depends[Database]) -> str:
+            return f"Hello {name} from {db.url}"  # type: ignore[attr-defined]
 
-    @app.method("ping")
-    def ping(db: Depends[Database]) -> str:
-        return db.url
+        await app.consume()
+        result = await app.make("greet", name="World").call()
+        assert result == "Hello World from postgres://db"
 
-    await app.consume()
-    result = await app.make("ping").call()
-    assert result == "postgres://db"
+    async def test_kwds_override(self, app, transport):
+        app.dependencies.add_singleton(Database, lambda: Database("preview"))
 
+        @app.method("check")
+        def check(db: Depends[Database]) -> str:
+            if isinstance(db, Database):
+                return f"DI:{db.url}"
+            return f"override:{db}"
 
-async def test_di_with_rpc_args() -> None:
-    transport = MockTransport()
-    app = RpcApp(transport=transport)
-    app.dependencies.add_singleton(Database, lambda: Database("postgres://db"))
-    await app.init()
+        await app.consume()
 
-    @app.method("greet")
-    def greet(name: str, db: Depends[Database]) -> str:
-        return f"Hello {name} from {db.url}"
+        result_di = await app.make("check").call()
+        assert result_di == "DI:preview"
 
-    await app.consume()
-    result = await app.make("greet", name="World").call()
-    assert result == "Hello World from postgres://db"
+        result_override = await app.make("check", db="manual").call()
+        assert result_override == "override:manual"
 
+    async def test_no_deps_still_works(self, app, transport):
 
-async def test_di_kwds_override() -> None:
-    transport = MockTransport()
-    app = RpcApp(transport=transport)
-    app.dependencies.add_singleton(Database, lambda: Database("preview"))
-    await app.init()
+        @app.method("ping")
+        def ping() -> str:
+            return "pong"
 
-    @app.method("check")
-    def check(db: Depends[Database]) -> str:
-        if isinstance(db, Database):
-            return f"DI:{db.url}"
-        return f"override:{db}"
+        await app.consume()
+        result = await app.make("ping").call()
+        assert result == "pong"
 
-    await app.consume()
+    async def test_handler_without_annotation(self, app, transport):
+        app.dependencies.add_singleton(Database, lambda: Database("postgres://db"))
 
-    result_di = await app.make("check").call()
-    assert result_di == "DI:preview"
+        @app.method("echo")
+        def echo(value: str) -> str:
+            return value
 
-    result_override = await app.make("check", db="manual").call()
-    assert result_override == "override:manual"
+        await app.consume()
+        result = await app.make("echo", value="hello").call()
+        assert result == "hello"
 
+    async def test_multiple_deps(self, app, transport):
+        app.dependencies.add_singleton(Database, lambda: Database("postgres://db"))
+        app.dependencies.add_singleton(Config, lambda: Config("production"))
 
-async def test_di_no_deps_still_works() -> None:
-    transport = MockTransport()
-    app = RpcApp(transport=transport)
-    await app.init()
+        @app.method("status")
+        def status(db: Depends[Database], cfg: Depends[Config]) -> str:
+            return f"{db.url}/{cfg.env}"  # type: ignore[attr-defined]
 
-    @app.method("ping")
-    def ping() -> str:
-        return "pong"
-
-    await app.consume()
-    result = await app.make("ping").call()
-    assert result == "pong"
-
-
-async def test_di_handler_without_annotation() -> None:
-    transport = MockTransport()
-    app = RpcApp(transport=transport)
-    app.dependencies.add_singleton(Database, lambda: Database("postgres://db"))
-    await app.init()
-
-    @app.method("echo")
-    def echo(value: str) -> str:
-        return value
-
-    await app.consume()
-    result = await app.make("echo", value="hello").call()
-    assert result == "hello"
-
-
-async def test_di_multiple_deps() -> None:
-    transport = MockTransport()
-    app = RpcApp(transport=transport)
-    app.dependencies.add_singleton(Database, lambda: Database("postgres://db"))
-    app.dependencies.add_singleton(Config, lambda: Config("production"))
-    await app.init()
-
-    @app.method("status")
-    def status(db: Depends[Database], cfg: Depends[Config]) -> str:
-        return f"{db.url}/{cfg.env}"
-
-    await app.consume()
-    result = await app.make("status").call()
-    assert result == "postgres://db/production"
+        await app.consume()
+        result = await app.make("status").call()
+        assert result == "postgres://db/production"

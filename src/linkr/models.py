@@ -2,10 +2,16 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
+
+
+class ErrorInfo(BaseModel):
+    error_code: str = ""
+    error_message: str = ""
+    error_details: dict[str, Any] | None = None
 
 
 class RpcRequest(BaseModel):
@@ -14,13 +20,17 @@ class RpcRequest(BaseModel):
 
     Attributes:
         id: Unique request identifier.
+        method: Method name to call.
+        args: Positional arguments for the handler.
+        kwds: Keyword arguments for the handler.
         headers: Arbitrary metadata.
-        data: Payload, typically a dict with method, args, kwds.
     """
 
     id: UUID = Field(default_factory=uuid4)
+    method: str
+    args: tuple[Any, ...]
+    kwds: dict[str, Any]
     headers: dict[str, Any] = Field(default_factory=dict)
-    data: dict[str, Any] | None = None
 
 
 class RpcResponse(BaseModel):
@@ -29,13 +39,14 @@ class RpcResponse(BaseModel):
 
     Attributes:
         id: Mirrors the corresponding request id.
-        headers: Arbitrary metadata.
         data: Result payload or error fields (error_code, error_message, error_details).
+        headers: Arbitrary metadata.
     """
 
     id: UUID
+    type: Literal["result", "error"]
+    data: Any
     headers: dict[str, Any] = Field(default_factory=dict)
-    data: dict[str, Any] | None = None
 
 
 @dataclass
@@ -45,7 +56,7 @@ class HandlerInfo:
 
     Attributes:
         name: Method name as registered via @app.method().
-        fn: Callable implementing the handler.
+        func: Callable implementing the handler.
         signature: String representation of the handler signature.
         options: Arbitrary keyword options passed to @app.method().
         dep_types: Mapping of parameter name to dependency type resolved
@@ -57,3 +68,9 @@ class HandlerInfo:
     signature: str
     options: dict[str, Any] = field(default_factory=dict)
     dep_types: dict[str, type] = field(default_factory=dict)
+
+
+@dataclass
+class RawMessage:
+    data: bytes
+    headers: dict[str, Any]

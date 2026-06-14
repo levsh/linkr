@@ -4,8 +4,8 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from linkr.models import RpcRequest, RpcResponse
-from linkr.transports import Transport
+from ..models import RawMessage, RpcRequest
+from . import Transport
 
 
 class MockTransport(Transport):
@@ -24,8 +24,8 @@ class MockTransport(Transport):
     def __init__(self) -> None:
         self._handler: (
             Callable[
-                [bytes, RpcRequest, dict[str, str] | None],
-                Awaitable[tuple[bytes, RpcResponse | None, dict[str, str]] | None],
+                [RawMessage],
+                Awaitable[RawMessage | None],
             ]
             | None
         ) = None
@@ -36,7 +36,7 @@ class MockTransport(Transport):
     async def init(self) -> None:
         """No-op for mock transport."""
 
-    async def close(self) -> None:
+    async def close(self, timeout: float | None = None) -> None:
         """
         Reset the transport and signal cancellation to pending requests.
 
@@ -51,8 +51,8 @@ class MockTransport(Transport):
     async def consume(
         self,
         handler: Callable[
-            [bytes, RpcRequest, dict[str, str] | None],
-            Awaitable[tuple[bytes, RpcResponse | None, dict[str, str]] | None],
+            [RawMessage],
+            Awaitable[RawMessage | None],
         ],
         queue: str | None = None,
     ) -> None:
@@ -60,10 +60,9 @@ class MockTransport(Transport):
         Register a handler to process incoming requests.
 
         Args:
-            handler: Async callable that receives
-                ``(request_bytes, original_request, wire_headers)`` and
-                returns ``(response_bytes, original_response, response_wire_headers)``
-                or ``None`` for fire-and-forget.
+            handler: Async callable that receives a :class:`RawMessage`
+                and returns a :class:`RawMessage` or ``None`` for
+                fire-and-forget.
             queue: Ignored. Present for interface compatibility with
                 :class:`RmqTransport`.
         """
@@ -78,11 +77,10 @@ class MockTransport(Transport):
 
     async def publish(
         self,
-        data: bytes,
+        request: RpcRequest,
+        message: RawMessage,
         *,
-        original: RpcRequest,
-        wire_headers: dict[str, Any] | None = None,
-        **kwds: Any,
+        kwds: dict[str, Any] | None = None,
     ) -> None:
         """
         Publish a fire-and-forget message.
@@ -91,21 +89,19 @@ class MockTransport(Transport):
         expected.
 
         Args:
-            data: Serialised request bytes (not used by mock).
-            original: The original RPC request (stored in sent_messages).
-            wire_headers: Wire-level headers (not used by mock).
-            **kwds: Ignored. Present for interface compatibility.
+            request: The original RPC request (stored in sent_messages).
+            message: The serialised request as a :class:`RawMessage`.
+            kwds: Additional call context forwarded from the caller.
         """
-        self.sent_messages.append(original)
+        self.sent_messages.append(request)
 
     async def request(
         self,
-        data: bytes,
+        request: RpcRequest,
+        message: RawMessage,
         *,
-        original: RpcRequest,
-        wire_headers: dict[str, Any] | None = None,
-        **kwds: Any,
-    ) -> tuple[bytes, dict[str, str]]:
+        kwds: dict[str, Any] | None = None,
+    ) -> RawMessage:
         """
         Send a request and return the handler's response.
 
@@ -115,26 +111,24 @@ class MockTransport(Transport):
         :class:`asyncio.CancelledError`.
 
         Args:
-            data: Serialised request bytes (forwarded to handler).
-            original: The original RPC request (forwarded to handler and
+            request: The original RPC request (forwarded to handler and
                 stored in sent_messages).
-            wire_headers: Wire-level headers (forwarded to handler).
-            **kwds: Ignored. Present for interface compatibility.
+            message: The serialised request as a :class:`RawMessage`.
+            kwds: Additional call context forwarded from the caller.
 
         Returns:
-            ``(response_bytes, response_wire_headers)`` as returned by the
-            registered handler.
+            The response as a :class:`RawMessage`.
 
         Raises:
             RuntimeError: If no handler is registered.
             asyncio.CancelledError: If the transport is closed while
                 waiting for a response.
         """
-        self.sent_messages.append(original)
+        self.sent_messages.append(request)
         if self._handler is None:
             raise RuntimeError("No consumer registered")
 
-        handler_task = asyncio.ensure_future(self._handler(data, original, wire_headers))
+        handler_task = asyncio.ensure_future(self._handler(message))
         close_task = asyncio.create_task(self._closed.wait())
         done, _ = await asyncio.wait(
             [handler_task, close_task],
@@ -147,6 +141,5 @@ class MockTransport(Transport):
 
         result = handler_task.result()
         if result is None:
-            raise RuntimeError("Handler returned None, expected tuple[bytes, RpcResponse | None, dict[str, str]]")
-        response_bytes, _, response_wire = result
-        return (response_bytes, response_wire)
+            raise RuntimeError("Handler returned None, expected RawMessage")
+        return result

@@ -39,6 +39,8 @@ await app.close()
 - Gzip compression via `GzipMiddleware`
 - Dependency injection with `Depends[T]`
 - Pydantic serialization
+- JSON-RPC 2.0 support via `JsonRpcSerializer`
+- Multi-serializer with auto-detection
 - Mock transport for testing (no broker needed)
 - RabbitMQ transport
 
@@ -48,17 +50,20 @@ await app.close()
 import logging
 
 from linkr import AppMiddleware
-from linkr.models import RpcRequest, RpcResponse
 
 
 class LoggingMiddleware(AppMiddleware):
-    async def process_request(self, request: RpcRequest) -> RpcRequest:
-        if request.data:
-            logging.info("[%s] Calling %s", request.id, request.data.get("method"))
-        return request
+    async def dispatch_client(self, call_next, request, *, kwds=None):
+        logging.info("[%s] Calling %s", request.id, request.method)
+        response = await call_next()
+        if response:
+            logging.info("[%s] Done", request.id)
+        return response
 
-    async def process_response(self, request: RpcRequest, response: RpcResponse) -> RpcResponse:
-        if response.data:
+    async def dispatch_server(self, call_next, request, *, kwds=None):
+        logging.info("[%s] Calling %s", request.id, request.method)
+        response = await call_next()
+        if response:
             logging.info("[%s] Done", request.id)
         return response
 
@@ -82,32 +87,41 @@ Custom wire-level middleware inherits from `WireMiddleware` and works with raw b
 import gzip
 
 from linkr import WireMiddleware
-from linkr.models import RpcRequest, RpcResponse
+from linkr.models import RawMessage, RpcRequest
 
 
 class CustomCompression(WireMiddleware):
-    async def send(
+    async def dispatch_client(
         self,
-        data: bytes,
-        headers: dict[str, str],
+        call_next,
+        request_raw_message: RawMessage,
         request: RpcRequest,
-        response: RpcResponse | None = None,
-    ) -> tuple[bytes, dict[str, str]]:
-        if len(data) >= 1024:
-            data = gzip.compress(data)
-            existing = headers.get("content_encoding", "")
-            headers["content_encoding"] = f"{existing},gzip" if existing else "gzip"
-        return data, headers
+        *,
+        kwds=None,
+    ) -> RawMessage | None:
+        if len(request_raw_message.data) >= 1024:
+            request_raw_message.data = gzip.compress(request_raw_message.data)
+        raw_response = await call_next()
+        if raw_response and raw_response.headers.get("content_encoding") == "gzip":
+            raw_response.data = gzip.decompress(raw_response.data)
+        return raw_response
 
-    async def receive(
+    async def dispatch_server(
         self,
-        data: bytes,
-        headers: dict[str, str],
-        request: RpcRequest,
-    ) -> tuple[bytes, dict[str, str]]:
-        if "gzip" in headers.get("content_encoding", ""):
-            data = gzip.decompress(data)
-        return data, headers
+        call_next,
+        request_raw_message: RawMessage,
+        *,
+        kwds=None,
+    ):
+        if request_raw_message.headers.get("content_encoding") == "gzip":
+            request_raw_message.data = gzip.decompress(request_raw_message.data)
+        result = await call_next()
+        if result is None or result[0] is None:
+            return None, None
+        raw_response, response = result
+        if len(raw_response.data) >= 1024:
+            raw_response.data = gzip.compress(raw_response.data)
+        return raw_response, response
 ```
 
 ## Dependency Injection

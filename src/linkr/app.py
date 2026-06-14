@@ -2,20 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from functools import wraps
-from typing import Any, get_args, get_origin, get_type_hints
+from typing import Any, cast, get_args, get_origin, get_type_hints
 from uuid import uuid4
 
-from pydantic import TypeAdapter as _TypeAdapter
-from pydantic import ValidationError as _PydanticValidationError
+from pydantic import TypeAdapter, ValidationError
 
-from linkr.di import Depends, DiContainer
-from linkr.exceptions import RpcError
-from linkr.middleware.base import AppMiddleware, WireMiddleware
-from linkr.models import HandlerInfo, RpcRequest, RpcResponse
-from linkr.serializer import JsonSerializer, Serializer
-from linkr.transports import Transport
+from .di import Depends, DiContainer
+from .exceptions import ErrorCode, RpcError
+from .middleware.base import AppMiddleware, WireMiddleware
+from .models import ErrorInfo, HandlerInfo, RawMessage, RpcRequest, RpcResponse
+from .serializer import JsonSerializer, Serializer
+from .transports import Transport
 
 
 class RpcCall:
@@ -24,7 +23,7 @@ class RpcCall:
 
     Returned by :meth:`RpcApp.make` to allow deferred or repeated execution
     of the same request with optional per-call overrides for timeout, TTL,
-    and rTTL.
+    rTTL, and serializer.
     """
 
     def __init__(self, app: RpcApp, request: RpcRequest) -> None:
@@ -47,6 +46,7 @@ class RpcCall:
         timeout: float | None = None,
         ttl: float | None = None,
         rttl: float | None = None,
+        serializer: str | None = None,
         **kwds: Any,
     ) -> Any:
         """
@@ -55,10 +55,14 @@ class RpcCall:
         Shorthand for ``await self.app.call(self.request, ...)``.
 
         Args:
-            timeout: Maximum seconds to wait for a response.
+            timeout: Maximum execution time in seconds for the remote handler.
+                If the handler does not complete within this window the server
+                sends back a TIMEOUT error. For a client-side deadline wrap the
+                call in ``asyncio.wait_for(...)``.
             ttl: Message time-to-live in seconds (broker discards expired).
             rttl: Response TTL in seconds.
-            **kwds: Forwarded to :meth:`RpcApp.call`.
+            serializer: Serializer name to use for this call.
+            **kwds: Additional call context.
 
         Returns:
             The handler's return value.
@@ -67,7 +71,7 @@ class RpcCall:
             RpcError: If the server returned an error response.
             RuntimeError: If the app is closed.
         """
-        return await self._app.call(self._request, timeout=timeout, ttl=ttl, rttl=rttl, **kwds)
+        return await self._app.call(self._request, timeout=timeout, ttl=ttl, rttl=rttl, serializer=serializer, **kwds)
 
     async def call(
         self,
@@ -75,6 +79,7 @@ class RpcCall:
         timeout: float | None = None,
         ttl: float | None = None,
         rttl: float | None = None,
+        serializer: str | None = None,
         **kwds: Any,
     ) -> Any:
         """
@@ -84,10 +89,14 @@ class RpcCall:
         Identical to :meth:`__call__`.
 
         Args:
-            timeout: Maximum seconds to wait for a response.
+            timeout: Maximum execution time in seconds for the remote handler.
+                If the handler does not complete within this window the server
+                sends back a TIMEOUT error. For a client-side deadline wrap the
+                call in ``asyncio.wait_for(...)``.
             ttl: Message time-to-live in seconds (broker discards expired).
             rttl: Response TTL in seconds.
-            **kwds: Forwarded to :meth:`RpcApp.call`.
+            serializer: Serializer name to use for this call.
+            **kwds: Additional call context.
 
         Returns:
             The handler's return value.
@@ -96,7 +105,7 @@ class RpcCall:
             RpcError: If the server returned an error response.
             RuntimeError: If the app is closed.
         """
-        return await self._app.call(self._request, timeout=timeout, ttl=ttl, rttl=rttl, **kwds)
+        return await self._app.call(self._request, timeout=timeout, ttl=ttl, rttl=rttl, serializer=serializer, **kwds)
 
 
 class RpcApp:
@@ -119,10 +128,14 @@ class RpcApp:
 
     Args:
         transport: Backend used for message exchange (e.g. MockTransport, RmqTransport).
-        timeout: Default timeout in seconds for all calls.
+        timeout: Default execution timeout in seconds for all remote handlers.
+            Passed to the server which enforces it; the client does not time out
+            the underlying transport call automatically.
         ttl: Default message TTL in seconds.
         rttl: Default response TTL in seconds.
-        serializer: Serializer for request/response encoding.
+        serializer: Serializer or list of serializers for request/response
+            encoding. When a list is given the first entry is the default
+            and the server auto-detects the format for incoming requests.
             Defaults to :class:`JsonSerializer`.
     """
 
@@ -133,7 +146,7 @@ class RpcApp:
         timeout: float | None = None,
         ttl: float | None = None,
         rttl: float | None = None,
-        serializer: Serializer | None = None,
+        serializer: Serializer | list[Serializer] | None = None,
     ) -> None:
         self._transport = transport
         self._timeout = timeout
@@ -143,8 +156,21 @@ class RpcApp:
         self._handlers: dict[str, HandlerInfo] = {}
         self._app_mw: list[AppMiddleware] = []
         self._wire_mw: list[WireMiddleware] = []
-        self._serializer = serializer or JsonSerializer()
         self.dependencies = DiContainer()
+        self._serializers: dict[str | None, Serializer] = {}
+        serializers: list[Serializer]
+        if serializer is None:
+            serializers = [JsonSerializer()]
+        elif isinstance(serializer, Serializer):
+            serializers = [serializer]
+        else:
+            serializers = serializer
+        for s in serializers:
+            self._serializers[s.name] = s
+        self._serializers[None] = serializers[0]
+
+    def _get_serializer(self, name: str | None) -> Serializer:
+        return self._serializers[name]
 
     def add_middleware(self, mw: AppMiddleware | WireMiddleware) -> None:
         """
@@ -152,7 +178,7 @@ class RpcApp:
 
         App-level middleware is applied in registration order
         around request/response processing.
-        Wire-level middleware is applied in send/receive order around the
+        Wire-level middleware is applied in dispatch order around the
         transport.
 
         Args:
@@ -160,10 +186,10 @@ class RpcApp:
                 (deserialized objects); WireMiddleware is added to the wire
                 chain (raw bytes).
         """
-        if isinstance(mw, WireMiddleware):
-            self._wire_mw.append(mw)
-        else:
+        if isinstance(mw, AppMiddleware):
             self._app_mw.append(mw)
+        else:
+            self._wire_mw.append(mw)
 
     def method(
         self,
@@ -184,6 +210,7 @@ class RpcApp:
         """
 
         def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+
             @wraps(fn)
             def wrapper(*args: Any, **kwds: Any) -> Any:
                 return fn(*args, **kwds)
@@ -225,11 +252,10 @@ class RpcApp:
         """All registered handlers keyed by method name."""
         return dict(self._handlers)
 
-    def _routing_key(self, method: str) -> str:
-        if "/" not in method:
-            return "rpc.server"
-        group = method.rsplit("/", 1)[0]
-        return f"rpc.server.{group}"
+    def _queue(self, method: str) -> str | None:
+        if "/" in method:
+            return method.rsplit("/", 1)[0]
+        return None
 
     def _resolve_deps(self, info: HandlerInfo) -> dict[str, Any]:
         return {name: self.dependencies.resolve(dep_type) for name, dep_type in info.dep_types.items()}
@@ -256,8 +282,10 @@ class RpcApp:
         """
         request = RpcRequest(
             id=uuid4(),
-            headers={"routing_key": self._routing_key(method)},
-            data={"method": method, "args": args, "kwds": kwds},
+            method=method,
+            args=args,
+            kwds=kwds,
+            headers={"queue": self._queue(method)},
         )
         return RpcCall(self, request)
 
@@ -273,7 +301,7 @@ class RpcApp:
         for wmw in self._wire_mw:
             await wmw.init()
 
-    async def close(self) -> None:
+    async def close(self, timeout: float | None = None) -> None:
         """
         Shut down the application.
 
@@ -283,13 +311,17 @@ class RpcApp:
         2. Close app-level middleware (reverse order).
         3. Close wire-level middleware (reverse order).
         4. Close transport.
+
+        Args:
+            timeout: Passed to the transport's ``close()``.  See
+                :meth:`Transport.close` for details.
         """
         await self.stop_consume()
         for amw in reversed(self._app_mw):
             await amw.close()
         for wmw in reversed(self._wire_mw):
             await wmw.close()
-        await self._transport.close()
+        await self._transport.close(timeout=timeout)
         self._closed = True
 
     async def consume(self) -> None:
@@ -297,23 +329,22 @@ class RpcApp:
         Start listening for incoming RPC requests on the transport.
 
         Registers the internal request handler on the main server queue and
-        on any group-specific queues derived from method names containing
-        ``/`` (e.g. ``"api/user/get"`` creates a queue for group ``"api"``).
+        on any routing-prefix queues derived from method names containing
+        ``/`` (e.g. ``"api/user/get"`` creates a queue named
+        ``{server_queue_name}.api``).
 
         Raises:
             RuntimeError: If the app has already been closed.
         """
         if self._closed:
             raise RuntimeError("RpcApp is closed")
+
         await self._transport.consume(self._request_handler)
 
-        groups = set()
-        for full_name in self._handlers:
-            if "/" in full_name:
-                group = full_name.rsplit("/", 1)[0]
-                groups.add(group)
-        for group in groups:
-            await self._transport.consume(self._request_handler, queue=group)
+        for name in self._handlers:
+            queue = self._queue(name)
+            if queue:
+                await self._transport.consume(self._request_handler, queue=queue)
 
     async def stop_consume(self) -> None:
         """Stop listening for incoming RPC requests."""
@@ -326,25 +357,30 @@ class RpcApp:
         timeout: float | None = None,
         ttl: float | None = None,
         rttl: float | None = None,
+        serializer: str | None = None,
         **kwds: Any,
     ) -> Any:
         """
         Send an RPC request and await the response.
 
-        Runs the full middleware pipeline: app-level request middleware,
-        serialization, wire-level send middleware, transport request,
-        wire-level receive middleware, deserialization, app-level response
-        middleware.
+        Runs the full middleware pipeline: app-level dispatch_client,
+        serialization, wire-level dispatch_client, transport request,
+        wire-level dispatch_client response handling, deserialization,
+        app-level dispatch_client response handling.
 
         Args:
             request: The prepared RPC request to send.
-            timeout: Maximum seconds to wait for a response.
-                Falls back to the app-level default if not set.
+            timeout: Maximum execution time in seconds for the remote handler.
+                If the handler does not complete within this window the server
+                returns a TIMEOUT error. Falls back to the app-level default.
+                This is a server-side limit; for a client-side deadline wrap
+                the call in ``asyncio.wait_for(...)``.
             ttl: Message time-to-live in seconds (broker discards expired).
                 Falls back to the app-level default; if neither is set
                 but *timeout* is given, TTL is set to the same value.
             rttl: Response TTL in seconds.
-            **kwds: Forwarded to the transport layer.
+            serializer: Serializer name or None for default.
+            **kwds: Additional call context.
 
         Returns:
             The handler's return value.
@@ -360,6 +396,7 @@ class RpcApp:
         timeout = timeout if timeout is not None else self._timeout
         ttl = ttl if ttl is not None else self._ttl
         rttl = rttl if rttl is not None else self._rttl
+
         if ttl is None and timeout is not None:
             ttl = timeout
         if ttl is not None:
@@ -369,40 +406,59 @@ class RpcApp:
         if rttl is not None:
             request.headers["rttl"] = rttl
 
-        for amw in self._app_mw:
-            request = await amw.process_request(request, **kwds)
+        ser = self._get_serializer(serializer)
 
-        body, wire = self._serializer.dumps_request(request)
+        async def core() -> RpcResponse:
+            raw_request = ser.dumps_request(request)
 
-        for wmw in self._wire_mw:
-            body, wire = await wmw.send(body, wire, request, **kwds)
+            async def transport_call() -> RawMessage | None:
+                return await self._transport.request(request, raw_request, kwds=kwds)
 
-        response_bytes, response_wire = await self._transport.request(
-            body,
-            original=request,
-            wire_headers=wire or None,
-            **kwds,
-        )
+            def wrap_client(
+                mw: WireMiddleware,
+                handler: Callable[[], Coroutine[Any, Any, RawMessage | None]],
+            ) -> Callable[[], Coroutine[Any, Any, RawMessage | None]]:
+                async def wrapper() -> RawMessage | None:
+                    return await mw.dispatch_client(handler, raw_request, request, kwds=kwds)
 
-        body = response_bytes
-        wire = response_wire or {}
+                return wrapper
 
-        for wmw in self._wire_mw:
-            body, wire = await wmw.receive(body, wire, request, **kwds)
+            wire_handler: Callable[[], Coroutine[Any, Any, RawMessage | None]] = transport_call
+            for mw in reversed(self._wire_mw):
+                wire_handler = wrap_client(mw, wire_handler)
 
-        response = self._serializer.loads_response(body, wire)
+            raw_response = await wire_handler()
+            if raw_response is None:
+                return cast(RpcResponse, None)
 
-        for amw in self._app_mw:
-            response = await amw.process_response(request, response, **kwds)
+            return ser.loads_response(raw_response)
 
-        if response.data and "error_code" in response.data:
-            raise RpcError(
-                error_code=response.data["error_code"],
-                error_message=response.data.get("error_message", ""),
-                error_details=response.data.get("error_details"),
-            )
-        if response.data is None:
+        def wrap_client(
+            mw: AppMiddleware,
+            handler: Callable[[], Coroutine[Any, Any, RpcResponse]],
+        ) -> Callable[[], Coroutine[Any, Any, RpcResponse]]:
+
+            async def wrapper() -> RpcResponse:
+                return cast(RpcResponse, await mw.dispatch_client(handler, request, kwds=kwds))
+
+            return wrapper
+
+        handler = core
+        for mw in reversed(self._app_mw):
+            handler = wrap_client(mw, handler)
+
+        response = await handler()
+
+        if response is None or response.data is None:
             return None
+
+        if isinstance(response.data, dict) and "error_code" in response.data:
+            info = ErrorInfo.model_validate(response.data)
+            raise RpcError(
+                error_code=info.error_code,
+                error_message=info.error_message,
+                error_details=info.error_details,
+            )
         return response.data.get("result")
 
     async def publish(
@@ -412,6 +468,7 @@ class RpcApp:
         timeout: float | None = None,
         ttl: float | None = None,
         rttl: float | None = None,
+        serializer: str | None = None,
         **kwds: Any,
     ) -> None:
         """
@@ -419,14 +476,16 @@ class RpcApp:
 
         The message is sent but no response is expected. Useful for
         notifications or one-way events. The middleware pipeline is
-        processed up to transport send; the response path is skipped.
+        processed up to transport publish; the response path is skipped.
 
         Args:
             request: The prepared RPC request to publish.
-            timeout: Default call timeout (stored in request headers).
+            timeout: Server-side execution timeout (stored in request headers).
+                If not set, falls back to the app-level default.
             ttl: Message time-to-live. Falls back to *timeout* if not set.
             rttl: Response TTL (stored in request headers).
-            **kwds: Forwarded to the transport layer.
+            serializer: Serializer name or None for default.
+            **kwds: Additional call context.
 
         Raises:
             RuntimeError: If the app is closed.
@@ -437,6 +496,7 @@ class RpcApp:
         timeout = timeout if timeout is not None else self._timeout
         ttl = ttl if ttl is not None else self._ttl
         rttl = rttl if rttl is not None else self._rttl
+
         if ttl is None and timeout is not None:
             ttl = timeout
         if ttl is not None:
@@ -446,56 +506,149 @@ class RpcApp:
         if rttl is not None:
             request.headers["rttl"] = rttl
 
-        for amw in self._app_mw:
-            request = await amw.process_request(request, **kwds)
+        ser = self._get_serializer(serializer)
 
-        body, wire = self._serializer.dumps_request(request)
+        async def core() -> None:
+            raw_request = ser.dumps_request(request)
 
-        for wmw in self._wire_mw:
-            body, wire = await wmw.send(body, wire, request, **kwds)
+            async def transport_publish() -> RawMessage | None:
+                await self._transport.publish(request, raw_request, kwds=kwds)
+                return None
 
-        await self._transport.publish(
-            body, original=request, wire_headers=wire or None, **kwds,
-        )
+            def wrap_client(
+                mw: WireMiddleware,
+                handler: Callable[[], Coroutine[Any, Any, RawMessage | None]],
+            ) -> Callable[[], Coroutine[Any, Any, RawMessage | None]]:
+                async def wrapper() -> RawMessage | None:
+                    return await mw.dispatch_client(handler, raw_request, request, kwds=kwds)
+
+                return wrapper
+
+            wire_handler: Callable[[], Coroutine[Any, Any, RawMessage | None]] = transport_publish
+            for mw in reversed(self._wire_mw):
+                wire_handler = wrap_client(mw, wire_handler)
+
+            await wire_handler()
+
+        def wrap_client(
+            mw: AppMiddleware,
+            handler: Callable[[], Coroutine[Any, Any, None]],
+        ) -> Callable[[], Coroutine[Any, Any, None]]:
+
+            async def wrapper() -> None:
+                await mw.dispatch_client(handler, request, kwds=kwds)
+
+            return wrapper
+
+        handler = core
+        for mw in reversed(self._app_mw):
+            handler = wrap_client(mw, handler)
+
+        await handler()
 
     async def _request_handler(
         self,
-        data: bytes,
-        original: RpcRequest,
-        wire_headers: dict[str, str] | None = None,
-    ) -> tuple[bytes, RpcResponse | None, dict[str, str]] | None:
-        body = data
-        headers = wire_headers or {}
+        raw_request: RawMessage,
+    ) -> RawMessage | None:
 
-        for wmw in self._wire_mw:
-            body, headers = await wmw.receive(body, headers, original)
+        async def core() -> tuple[RawMessage, RpcResponse] | tuple[None, None]:
+            request = ser.loads_request(raw_request)
 
-        request = self._serializer.loads_request(body, headers)
+            async def dispatch_core() -> RpcResponse | None:
+                return await self._dispatch(request)
 
-        for amw in self._app_mw:
-            request = await amw.process_request(request)
+            def wrap_server(
+                mw: AppMiddleware,
+                handler: Callable[[], Coroutine[Any, Any, RpcResponse | None]],
+            ) -> Callable[[], Coroutine[Any, Any, RpcResponse | None]]:
+                async def wrapper() -> RpcResponse | None:
+                    return await mw.dispatch_server(handler, request)
 
-        response = await self._dispatch(request)
+                return wrapper
 
-        if response is None:
-            return None
+            handler: Callable[[], Coroutine[Any, Any, RpcResponse | None]] = dispatch_core
+            for amw in reversed(self._app_mw):
+                handler = wrap_server(amw, handler)
 
-        rttl = request.headers.get("rttl")
-        if rttl is not None:
-            response.headers["rttl"] = rttl
+            response = await handler()
 
-        for amw in self._app_mw:
-            response = await amw.process_response(request, response)
+            if response is None:
+                return None, None
 
-        body, wire = self._serializer.dumps_response(response)
+            rttl = request.headers.get("rttl")
+            if rttl is not None:
+                response.headers["rttl"] = rttl
 
-        for wmw in self._wire_mw:
-            body, wire = await wmw.send(body, wire, request, response)
+            raw_msg = ser.dumps_response(response)
+            return raw_msg, response
 
-        return (body, response, wire)
+        def wrap_server(
+            mw: WireMiddleware,
+            handler: Callable[[], Coroutine[Any, Any, tuple[RawMessage, RpcResponse] | tuple[None, None]]],
+        ) -> Callable[[], Coroutine[Any, Any, tuple[RawMessage, RpcResponse] | tuple[None, None]]]:
+            async def wrapper() -> tuple[RawMessage, RpcResponse] | tuple[None, None]:
+                return await mw.dispatch_server(handler, raw_request)
+
+            return wrapper
+
+        ser = self._serializers[None]
+        try:
+            ser = self._detect_serializer(raw_request)
+
+            wire_handler: Callable[[], Coroutine[Any, Any, tuple[RawMessage, RpcResponse] | tuple[None, None]]] = core
+            for mw in reversed(self._wire_mw):
+                wire_handler = wrap_server(mw, wire_handler)
+
+            result = await wire_handler()
+            if result is None or result[0] is None:
+                return None
+            raw_response, _ = result
+            return raw_response
+        except Exception as exc:
+            if isinstance(exc, RpcError):
+                ec = exc.error_code
+                msg = exc.error_message
+                details = exc.error_details
+                req_id = uuid4()
+            else:
+                ec = ErrorCode.INTERNAL_ERROR
+                msg = "Internal server error"
+                details = {"exc_type": type(exc).__name__}
+                try:
+                    request = ser.loads_request(raw_request)
+                    req_id = request.id
+                except Exception:
+                    req_id = uuid4()
+
+            error_resp = RpcResponse(
+                id=req_id,
+                type="error",
+                data=ErrorInfo(error_code=ec, error_message=msg, error_details=details),
+            )
+            return ser.dumps_response(error_resp)
+
+    def _detect_serializer(self, raw_request: RawMessage) -> Serializer:
+        ser_name = raw_request.headers.get("serializer")
+        if ser_name is not None:
+            return self._get_serializer(ser_name)
+
+        for candidate in self._serializers.values():
+            if candidate is None:
+                continue
+            try:
+                candidate.loads_request(raw_request)
+                return candidate
+            except Exception:
+                continue
+
+        return self._serializers[None]
 
     def _validate_args(
-        self, info: HandlerInfo, args: tuple[Any, ...], kwds: dict[str, Any], request: RpcRequest
+        self,
+        info: HandlerInfo,
+        args: tuple[Any, ...],
+        kwds: dict[str, Any],
+        request: RpcRequest,
     ) -> RpcResponse | None:
         if not info.options.get("validate_types"):
             return None
@@ -524,74 +677,78 @@ class RpcApp:
                 continue
 
             try:
-                _TypeAdapter(hint).validate_python(value)
-            except _PydanticValidationError as e:
+                TypeAdapter(hint).validate_python(value)
+            except ValidationError as e:
                 errors.append(f"{pname}: {e.errors(include_input=False, include_url=False)}")
 
         if errors:
             return RpcResponse(
                 id=request.id,
-                data={
-                    "error_code": "ValidationError",
-                    "error_message": "; ".join(errors),
-                },
+                type="error",
+                data=ErrorInfo(
+                    error_code=ErrorCode.VALIDATION_ERROR,
+                    error_message="; ".join(errors),
+                ),
             )
 
         return None
 
     async def _dispatch(self, request: RpcRequest) -> RpcResponse:
-        data = request.data
-        if not isinstance(data, dict) or "method" not in data:
-            return RpcResponse(
-                id=request.id,
-                data={
-                    "error_code": "BadRequest",
-                    "error_message": "Missing 'method' in request data",
-                },
-            )
-
-        method = data["method"]
+        method = request.method
         info = self._handlers.get(method)
         if info is None:
             return RpcResponse(
                 id=request.id,
-                data={
-                    "error_code": "MethodNotFound",
-                    "error_message": f"No handler registered for method: {method}",
-                },
+                type="error",
+                data=ErrorInfo(
+                    error_code=ErrorCode.METHOD_NOT_FOUND,
+                    error_message=f"No handler registered for method: {method}",
+                ),
             )
 
-        error_response = self._validate_args(info, data.get("args", ()), data.get("kwds", {}), request)
+        error_response = self._validate_args(info, request.args, request.kwds, request)
         if error_response is not None:
             return error_response
 
         try:
             deps = self._resolve_deps(info)
-            kwds = {**deps, **data.get("kwds", {})}
-            result = info.fn(*data.get("args", []), **kwds)
+            kwds = {**deps, **request.kwds}
+            result = info.fn(*request.args, **kwds)
             if asyncio.iscoroutine(result):
                 exec_timeout = request.headers.get("timeout")
                 if exec_timeout is not None:
                     result = await asyncio.wait_for(result, timeout=exec_timeout)
                 else:
                     result = await result
-            return RpcResponse(id=request.id, data={"result": result})
+            return RpcResponse(id=request.id, type="result", data={"result": result})
         except TimeoutError:
             return RpcResponse(
                 id=request.id,
-                data={
-                    "error_code": "Timeout",
-                    "error_message": "Handler execution timed out",
-                },
+                type="error",
+                data=ErrorInfo(
+                    error_code=ErrorCode.TIMEOUT,
+                    error_message="Handler execution timed out",
+                ),
+            )
+        except RpcError as exc:
+            return RpcResponse(
+                id=request.id,
+                type="error",
+                data=ErrorInfo(
+                    error_code=exc.error_code,
+                    error_message=exc.error_message,
+                    error_details=exc.error_details,
+                ),
             )
         except Exception as exc:
             return RpcResponse(
                 id=request.id,
-                data={
-                    "error_code": "InternalError",
-                    "error_message": str(exc),
-                    "error_details": {"exc_type": type(exc).__name__},
-                },
+                type="error",
+                data=ErrorInfo(
+                    error_code=ErrorCode.INTERNAL_ERROR,
+                    error_message=str(exc),
+                    error_details={"exc_type": type(exc).__name__},
+                ),
             )
 
     async def __aenter__(self) -> RpcApp:
