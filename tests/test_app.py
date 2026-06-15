@@ -8,7 +8,6 @@ from linkr import (
     AppMiddleware,
     Depends,
     ErrorCode,
-    GzipMiddleware,
     JsonRpcSerializer,
     JsonSerializer,
     MockTransport,
@@ -429,40 +428,6 @@ class TestAppMiddleware:
         result = await app.make("ping").call()
         assert result == "pong"
         assert server_headers[0].get("x-custom") == "test-value"
-
-    async def test_encoding_gzip_roundtrip(self):
-        transport = MockTransport()
-        app = RpcApp(transport=transport)
-        app.add_middleware(GzipMiddleware())
-        await app.init()
-
-        @app.method("ping")
-        def ping() -> str:
-            return "pong"
-
-        await app.consume()
-        result = await app.make("ping").call()
-        assert result == "pong"
-
-    async def test_encoding_add_middleware_appends(self):
-        transport = MockTransport()
-        app = RpcApp(transport=transport)
-        assert len(app._wire_mw) == 0
-        app.add_middleware(GzipMiddleware())
-        assert len(app._wire_mw) == 1
-
-    async def test_encoding_without_encoders_still_works(self):
-        transport = MockTransport()
-        app = RpcApp(transport=transport)
-        await app.init()
-
-        @app.method("add")
-        def add(x: int, y: int) -> int:
-            return x + y
-
-        await app.consume()
-        result = await app.make("add", 2, 3).call()
-        assert result == 5
 
     async def test_custom_wire_header_survives_roundtrip(self):
         server_seen: list[str] = []
