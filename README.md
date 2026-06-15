@@ -49,18 +49,33 @@ await app.close()
 ```python
 import logging
 
+from typing import Any
+
 from linkr import AppMiddleware
+from linkr.models import RpcRequest, RpcResponse
 
 
 class LoggingMiddleware(AppMiddleware):
-    async def dispatch_client(self, call_next, request, *, kwds=None):
+    async def dispatch_client(
+        self,
+        call_next,
+        request: RpcRequest,
+        *,
+        kwds: dict[str, Any] | None = None,
+    ) -> RpcResponse | None:
         logging.info("[%s] Calling %s", request.id, request.method)
         response = await call_next()
         if response:
             logging.info("[%s] Done", request.id)
         return response
 
-    async def dispatch_server(self, call_next, request, *, kwds=None):
+    async def dispatch_server(
+        self,
+        call_next,
+        request: RpcRequest,
+        *,
+        kwds: dict[str, Any] | None = None,
+    ) -> RpcResponse | None:
         logging.info("[%s] Calling %s", request.id, request.method)
         response = await call_next()
         if response:
@@ -86,8 +101,10 @@ Custom wire-level middleware inherits from `WireMiddleware` and works with raw b
 ```python
 import gzip
 
+from typing import Any
+
 from linkr import WireMiddleware
-from linkr.models import RawMessage, RpcRequest
+from linkr.models import RawMessage, RpcRequest, RpcResponse
 
 
 class CustomCompression(WireMiddleware):
@@ -97,7 +114,7 @@ class CustomCompression(WireMiddleware):
         request_raw_message: RawMessage,
         request: RpcRequest,
         *,
-        kwds=None,
+        kwds: dict[str, Any] | None = None,
     ) -> RawMessage | None:
         if len(request_raw_message.data) >= 1024:
             request_raw_message.data = gzip.compress(request_raw_message.data)
@@ -111,8 +128,8 @@ class CustomCompression(WireMiddleware):
         call_next,
         request_raw_message: RawMessage,
         *,
-        kwds=None,
-    ):
+        kwds: dict[str, Any] | None = None,
+    ) -> tuple[RawMessage, RpcResponse] | tuple[None, None]:
         if request_raw_message.headers.get("content_encoding") == "gzip":
             request_raw_message.data = gzip.decompress(request_raw_message.data)
         result = await call_next()
@@ -131,7 +148,8 @@ from linkr import Depends, MockTransport, RpcApp
 
 
 class Database:
-    ...
+    def __init__(self, url: str) -> None:
+        self.url = url
 
 
 transport = MockTransport()
