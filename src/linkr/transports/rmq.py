@@ -195,17 +195,6 @@ class RmqTransport(Transport):
             restore=True,
         )
 
-        await self._ops.queue_declare(self._server_queue_spec, restore=True, force=True)
-        await self._ops.bind(
-            BindSpec(
-                src=self._exchange_spec.name,
-                dst=self._server_queue_spec.name,
-                routing_key=self._server_queue_spec.name,
-                kind="queue",
-            ),
-            restore=True,
-        )
-
     async def close(self, timeout: float | None = None) -> None:
         """
         Shut down the transport.
@@ -231,9 +220,7 @@ class RmqTransport(Transport):
 
         with suppress(asyncio.TimeoutError):
             if self._pending:
-                done, pending = await asyncio.wait(
-                    list(self._pending.values()), timeout=_left()
-                )
+                done, pending = await asyncio.wait(list(self._pending.values()), timeout=_left())
                 for fut in pending:
                     fut.cancel()
             self._pending.clear()
@@ -267,7 +254,21 @@ class RmqTransport(Transport):
         """
         self._handler = handler
 
-        if queue is not None:
+        if queue is None:
+            queue_name = self._server_queue_spec.name
+            if queue_name in self._consumers:
+                return
+            await self._ops.queue_declare(self._server_queue_spec, restore=True, force=True)
+            await self._ops.bind(
+                BindSpec(
+                    src=self._exchange_spec.name,
+                    dst=queue_name,
+                    routing_key=queue_name,
+                    kind="queue",
+                ),
+                restore=True,
+            )
+        else:
             queue_name = f"{self._server_queue_spec.name}.{queue}"
             if queue_name in self._consumers:
                 return
@@ -286,10 +287,6 @@ class RmqTransport(Transport):
                 ),
                 restore=True,
             )
-        else:
-            queue_name = self._server_queue_spec.name
-            if queue_name in self._consumers:
-                return
 
         consumer = await self._ops.consume(
             ConsumerSpec(
