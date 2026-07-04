@@ -1,6 +1,6 @@
 [project]
 name = "linkr"
-version = "0.3.0"
+version = "0.3.1"
 description = "Async RPC framework with middleware support"
 readme = "README.md"
 requires-python = ">=3.11,<4"
