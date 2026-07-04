@@ -11,7 +11,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from .di import Depends, DiContainer
 from .exceptions import ErrorCode, RpcError
-from .middleware.base import AppMiddleware, WireMiddleware
+from .middleware import AppMiddleware, WireMiddleware
 from .models import ErrorInfo, HandlerInfo, RawMessage, RpcRequest, RpcResponse
 from .serializer import JsonSerializer, Serializer
 from .transports import Transport

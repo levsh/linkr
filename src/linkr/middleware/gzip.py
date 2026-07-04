@@ -5,7 +5,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from ..models import RawMessage, RpcRequest, RpcResponse
-from .base import WireMiddleware
+from . import WireMiddleware
 
 
 def _merge_ce(headers: dict[str, Any], name: str) -> None:

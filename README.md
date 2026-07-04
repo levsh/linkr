@@ -51,7 +51,7 @@ import logging
 
 from typing import Any
 
-from linkr import AppMiddleware
+from linkr import AppMiddleware, MockTransport, RpcApp
 from linkr.models import RpcRequest, RpcResponse
 
 
@@ -83,6 +83,7 @@ class LoggingMiddleware(AppMiddleware):
         return response
 
 
+app = RpcApp(MockTransport())
 app.add_middleware(LoggingMiddleware())
 ```
 
@@ -91,7 +92,7 @@ app.add_middleware(LoggingMiddleware())
 Compression, encryption and other wire transformations use `WireMiddleware`:
 
 ```python
-from linkr import GzipMiddleware
+from linkr.middleware.gzip import GzipMiddleware
 
 app.add_middleware(GzipMiddleware())
 ```
