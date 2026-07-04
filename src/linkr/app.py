@@ -253,6 +253,7 @@ class RpcApp:
         return dict(self._handlers)
 
     def _queue(self, method: str) -> str | None:
+        method = method.strip("/")
         if "/" in method:
             return method.rsplit("/", 1)[0]
         return None

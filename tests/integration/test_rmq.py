@@ -1,7 +1,6 @@
 import asyncio
 
 import pytest
-
 from linkr.app import RpcApp
 from linkr.exceptions import ErrorCode, RpcError
 from linkr.serializer import JsonRpcSerializer, JsonSerializer
