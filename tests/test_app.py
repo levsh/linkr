@@ -350,26 +350,34 @@ class TestAppMiddleware:
         events: list[str] = []
 
         class MwA(WireMiddleware):
-            async def dispatch_client(self, call_next, request_raw_message, request, *, kwds=None):
+            async def dispatch_client(
+                self, call_next, request_raw_message, request, *, kwds=None
+            ):
                 events.append("A-send")
                 raw_response = await call_next()
                 events.append("A-receive")
                 return raw_response
 
-            async def dispatch_server(self, call_next, request_raw_message, *, kwds=None):
+            async def dispatch_server(
+                self, call_next, request_raw_message, *, kwds=None
+            ):
                 events.append("A-receive")
                 result = await call_next()
                 events.append("A-send")
                 return result
 
         class MwB(WireMiddleware):
-            async def dispatch_client(self, call_next, request_raw_message, request, *, kwds=None):
+            async def dispatch_client(
+                self, call_next, request_raw_message, request, *, kwds=None
+            ):
                 events.append("B-send")
                 raw_response = await call_next()
                 events.append("B-receive")
                 return raw_response
 
-            async def dispatch_server(self, call_next, request_raw_message, *, kwds=None):
+            async def dispatch_server(
+                self, call_next, request_raw_message, *, kwds=None
+            ):
                 events.append("B-receive")
                 result = await call_next()
                 events.append("B-send")
@@ -407,11 +415,15 @@ class TestAppMiddleware:
         server_headers: list[dict[str, str]] = []
 
         class HeaderInjector(WireMiddleware):
-            async def dispatch_client(self, call_next, request_raw_message, request, *, kwds=None):
+            async def dispatch_client(
+                self, call_next, request_raw_message, request, *, kwds=None
+            ):
                 request_raw_message.headers["x-custom"] = "test-value"
                 return await call_next()
 
-            async def dispatch_server(self, call_next, request_raw_message, *, kwds=None):
+            async def dispatch_server(
+                self, call_next, request_raw_message, *, kwds=None
+            ):
                 server_headers.append(dict(request_raw_message.headers))
                 return await call_next()
 
@@ -433,11 +445,15 @@ class TestAppMiddleware:
         server_seen: list[str] = []
 
         class CustomWireHeaderMw(WireMiddleware):
-            async def dispatch_client(self, call_next, request_raw_message, request, *, kwds=None):
+            async def dispatch_client(
+                self, call_next, request_raw_message, request, *, kwds=None
+            ):
                 request_raw_message.headers["x-custom"] = "hello"
                 return await call_next()
 
-            async def dispatch_server(self, call_next, request_raw_message, *, kwds=None):
+            async def dispatch_server(
+                self, call_next, request_raw_message, *, kwds=None
+            ):
                 server_seen.append(request_raw_message.headers.get("x-custom", ""))
                 return await call_next()
 
@@ -514,24 +530,22 @@ class TestAppTimeoutsRouting:
         result = await app.make("ping").call()
         assert result == "pong"
 
-    async def test_publish_sends_timeout(self):
+    async def test_publish_sends_ttl(self):
         transport = MockTransport()
         app = RpcApp(transport=transport)
         await app.init()
 
         req = app.make("test", text="hello")
-        await app.publish(req.request, timeout=5)
-        assert transport.sent_messages[0].headers.get("timeout") == 5
+        await app.publish(req.request, ttl=5)
         assert transport.sent_messages[0].headers.get("ttl") == 5
 
-    async def test_publish_sends_timeout_from_default(self):
+    async def test_publish_sends_ttl_from_default(self):
         transport = MockTransport()
-        app = RpcApp(transport=transport, timeout=7)
+        app = RpcApp(transport=transport, ttl=7)
         await app.init()
 
         req = app.make("test", text="hello")
         await app.publish(req.request)
-        assert transport.sent_messages[0].headers.get("timeout") == 7
         assert transport.sent_messages[0].headers.get("ttl") == 7
 
     async def test_routing_key_without_group(self):
@@ -736,7 +750,9 @@ class TestAppMultiSerializer:
 
     async def test_app_multi_serializer_call_with_name(self):
         transport = MockTransport()
-        app = RpcApp(transport=transport, serializer=[JsonRpcSerializer(), JsonSerializer()])
+        app = RpcApp(
+            transport=transport, serializer=[JsonRpcSerializer(), JsonSerializer()]
+        )
         await app.init()
 
         @app.method("ping")
@@ -749,7 +765,9 @@ class TestAppMultiSerializer:
 
     async def test_app_multi_serializer_default_is_first(self):
         transport = MockTransport()
-        app = RpcApp(transport=transport, serializer=[JsonRpcSerializer(), JsonSerializer()])
+        app = RpcApp(
+            transport=transport, serializer=[JsonRpcSerializer(), JsonSerializer()]
+        )
         await app.init()
 
         @app.method("add")
@@ -762,7 +780,9 @@ class TestAppMultiSerializer:
 
     async def test_app_multi_serializer_auto_detect(self):
         transport = MockTransport()
-        app = RpcApp(transport=transport, serializer=[JsonSerializer(), JsonRpcSerializer()])
+        app = RpcApp(
+            transport=transport, serializer=[JsonSerializer(), JsonRpcSerializer()]
+        )
         await app.init()
 
         @app.method("ping")

@@ -155,21 +155,26 @@ class RmqTransport(Transport):
             return
 
         try:
-            request_id = message.header.properties.correlation_id or ""
+            request_id = message.header.properties.message_id
             if not request_id:
                 return
 
             wire_headers = getattr(message.header.properties, "headers", None) or {}
             raw_request = RawMessage(data=message.body, headers=wire_headers)
 
-            reply_to = message.header.properties.reply_to
-
             result = await self._handler(raw_request)
-
             if result is None:
                 return
 
-            await self._send(reply_to, request_id, result)
+            reply_to = message.header.properties.reply_to
+            if reply_to is None:
+                return
+
+            corellation_id = message.header.properties.correlation_id
+            if not corellation_id:
+                return
+
+            await self._send(reply_to, corellation_id, result)
 
         except Exception as e:
             logger.exception(e)
@@ -319,6 +324,7 @@ class RmqTransport(Transport):
         wire_headers: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         properties: dict[str, Any] = {}
+        properties["message_id"] = str(message.id)
         if correlation_id is not None:
             properties["correlation_id"] = correlation_id
         if reply_to is not None:
