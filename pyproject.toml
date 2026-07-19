@@ -45,6 +45,17 @@ ruff = "*"
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
 
+[tool.black]
+line-length = 120
+target-version = ["py311"]
+skip-string-normalization = false
+
+[tool.isort]
+profile = "black"
+line_length = 120
+indent = 4
+src_paths = ["."]
+
 [tool.ruff]
 line-length = 120
 
