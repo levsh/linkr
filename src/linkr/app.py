@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 from collections.abc import Callable, Coroutine
 from functools import wraps
 from typing import Any, cast, get_args, get_origin, get_type_hints
@@ -15,6 +16,8 @@ from .middleware import AppMiddleware, WireMiddleware
 from .models import ErrorInfo, HandlerInfo, RawMessage, RpcRequest, RpcResponse
 from .serializer import JsonSerializer, Serializer
 from .transports import Transport
+
+logger = logging.getLogger("linkr")
 
 
 class RpcCall:
@@ -71,7 +74,14 @@ class RpcCall:
             RpcError: If the server returned an error response.
             RuntimeError: If the app is closed.
         """
-        return await self._app.call(self._request, timeout=timeout, ttl=ttl, rttl=rttl, serializer=serializer, **kwds)
+        return await self._app.call(
+            self._request,
+            timeout=timeout,
+            ttl=ttl,
+            rttl=rttl,
+            serializer=serializer,
+            **kwds,
+        )
 
     async def call(
         self,
@@ -105,7 +115,14 @@ class RpcCall:
             RpcError: If the server returned an error response.
             RuntimeError: If the app is closed.
         """
-        return await self._app.call(self._request, timeout=timeout, ttl=ttl, rttl=rttl, serializer=serializer, **kwds)
+        return await self._app.call(
+            self._request,
+            timeout=timeout,
+            ttl=ttl,
+            rttl=rttl,
+            serializer=serializer,
+            **kwds,
+        )
 
 
 class RpcApp:
@@ -305,13 +322,6 @@ class RpcApp:
     async def close(self, timeout: float | None = None) -> None:
         """
         Shut down the application.
-
-        Order of shutdown:
-
-        1. Stop consuming requests.
-        2. Close app-level middleware (reverse order).
-        3. Close wire-level middleware (reverse order).
-        4. Close transport.
 
         Args:
             timeout: Passed to the transport's ``close()``.  See
@@ -585,7 +595,10 @@ class RpcApp:
 
         def wrap_server(
             mw: WireMiddleware,
-            handler: Callable[[], Coroutine[Any, Any, tuple[RawMessage, RpcResponse] | tuple[None, None]]],
+            handler: Callable[
+                [],
+                Coroutine[Any, Any, tuple[RawMessage, RpcResponse] | tuple[None, None]],
+            ],
         ) -> Callable[[], Coroutine[Any, Any, tuple[RawMessage, RpcResponse] | tuple[None, None]]]:
             async def wrapper() -> tuple[RawMessage, RpcResponse] | tuple[None, None]:
                 return await mw.dispatch_server(handler, raw_request)
@@ -596,7 +609,10 @@ class RpcApp:
         try:
             ser = self._detect_serializer(raw_request)
 
-            wire_handler: Callable[[], Coroutine[Any, Any, tuple[RawMessage, RpcResponse] | tuple[None, None]]] = core
+            wire_handler: Callable[
+                [],
+                Coroutine[Any, Any, tuple[RawMessage, RpcResponse] | tuple[None, None]],
+            ] = core
             for mw in reversed(self._wire_mw):
                 wire_handler = wrap_server(mw, wire_handler)
 
@@ -612,6 +628,7 @@ class RpcApp:
                 details = exc.error_details
                 req_id = uuid4()
             else:
+                logger.exception(exc)
                 ec = ErrorCode.INTERNAL_ERROR
                 msg = "Internal server error"
                 details = {"exc_type": type(exc).__name__}
@@ -742,6 +759,7 @@ class RpcApp:
                 ),
             )
         except Exception as exc:
+            logger.exception(exc)
             return RpcResponse(
                 id=request.id,
                 type="error",

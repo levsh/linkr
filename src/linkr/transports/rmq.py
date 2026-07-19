@@ -5,7 +5,7 @@ import logging
 import uuid
 from collections.abc import Awaitable, Callable, Coroutine
 from contextlib import suppress
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 from rmqaio import BindSpec, ConsumerSpec, ExchangeSpec, Ops, QueueSpec, Repeat, RetryPolicy, SharedConnection
 
@@ -438,6 +438,10 @@ class ThreadSafeRmqTransport(RmqTransport):
     (e.g. in a multi-threaded web server).
     """
 
+    def __init__(self, *args, **kwds):
+        super().__init__(*args, **kwds)
+        self._owner_loop: asyncio.AbstractEventLoop = cast(asyncio.AbstractEventLoop, None)
+
     async def init(self) -> None:
         """Record the owner loop, then delegate to :meth:`RmqTransport.init`."""
         self._owner_loop = asyncio.get_running_loop()
@@ -447,9 +451,7 @@ class ThreadSafeRmqTransport(RmqTransport):
         loop = asyncio.get_running_loop()
         if loop is self._owner_loop:
             return await coro
-        return await asyncio.wrap_future(
-            asyncio.run_coroutine_threadsafe(coro, self._owner_loop),
-        )
+        return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(coro, self._owner_loop))
 
     async def request(
         self,
