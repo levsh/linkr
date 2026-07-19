@@ -313,6 +313,8 @@ class RpcApp:
 
         Must be called before :meth:`consume`, :meth:`call`, or :meth:`publish`.
         """
+        if self._closed:
+            raise RuntimeError("RpcApp is closed")
         await self._transport.init()
         for amw in self._app_mw:
             await amw.init()
