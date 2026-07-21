@@ -7,9 +7,15 @@ from collections.abc import Awaitable, Callable, Coroutine
 from contextlib import suppress
 from typing import Any, TypeVar, cast
 
-from rmqaio import BindSpec, ConsumerSpec, ExchangeSpec, Ops, QueueSpec, Repeat, RetryPolicy, SharedConnection
+try:
+    from rmqaio import BindSpec, ConsumerSpec, ExchangeSpec, Ops, QueueSpec, Repeat, RetryPolicy, SharedConnection
+except ImportError as e:
+    raise ImportError(
+        "Missing optional dependency 'rmqaio'. "
+        "Install it with: pip install linkr[rabbitmq]"
+    ) from e
 
-from ..models import RawMessage, RpcRequest
+from ..models import RawMessage, Request
 from . import Transport
 
 logger = logging.getLogger("linkr")
@@ -37,7 +43,7 @@ class RmqTransport(Transport):
     RabbitMQ transport.
 
     Operates on raw bytes. Serialization and encoding are handled
-    by :class:`RpcApp` before data reaches the transport.
+    by :class:`App` before data reaches the transport.
     """
 
     def __init__(
@@ -183,9 +189,9 @@ class RmqTransport(Transport):
         """
         Open the RabbitMQ connection and declare required infrastructure.
 
-        Declares the exchange, the reply queue (with consumer), and the
-        server queue (with binding). Should be called once before any
-        other operations.
+        Declares the exchange and the reply queue (with consumer). The
+        server queue is declared later in :meth:`consume`. Should be
+        called once before any other operations.
         """
         await self._ops.exchange_declare(self._exchange_spec, restore=True)
 
@@ -274,7 +280,7 @@ class RmqTransport(Transport):
                 restore=True,
             )
         else:
-            queue_name = f"{self._server_queue_spec.name}.{queue}"
+            queue_name = f"{self._server_queue_spec.name}.{self._normalize_queue_name(queue)}"
             if queue_name in self._consumers:
                 return
             group_spec = QueueSpec(
@@ -311,14 +317,17 @@ class RmqTransport(Transport):
         self._consumers.clear()
         self._handler = None
 
-    def _resolve_routing_key(self, message: RpcRequest) -> str:
+    def _normalize_queue_name(self, name: str) -> str:
+        return name.replace("/", ".")
+
+    def _resolve_routing_key(self, message: Request) -> str:
         if message.headers.get("queue"):
-            return f"{self._server_queue_spec.name}.{message.headers['queue']}"
+            return f"{self._server_queue_spec.name}.{self._normalize_queue_name(message.headers['queue'])}"
         return self._server_queue_spec.name
 
     def _build_properties(
         self,
-        message: RpcRequest,
+        message: Request,
         correlation_id: str | None = None,
         reply_to: str | None = None,
         wire_headers: dict[str, Any] | None = None,
@@ -345,7 +354,7 @@ class RmqTransport(Transport):
 
     async def publish(
         self,
-        request: RpcRequest,
+        request: Request,
         message: RawMessage,
         *,
         kwds: dict[str, Any] | None = None,
@@ -373,7 +382,7 @@ class RmqTransport(Transport):
 
     async def request(
         self,
-        request: RpcRequest,
+        request: Request,
         message: RawMessage,
         *,
         kwds: dict[str, Any] | None = None,
@@ -394,8 +403,8 @@ class RmqTransport(Transport):
             The response as a :class:`RawMessage`.
 
         Raises:
-            asyncio.TimeoutError: If the reply is not received within
-                the operation timeout.
+            asyncio.TimeoutError: If the underlying ``publish`` operation
+                exceeds the operation timeout.
         """
         correlation_id = str(request.id)
         fut: asyncio.Future[RawMessage] = asyncio.get_running_loop().create_future()
@@ -438,7 +447,7 @@ class ThreadSafeRmqTransport(RmqTransport):
     (e.g. in a multi-threaded web server).
     """
 
-    def __init__(self, *args, **kwds):
+    def __init__(self, *args: Any, **kwds: Any) -> None:
         super().__init__(*args, **kwds)
         self._owner_loop: asyncio.AbstractEventLoop = cast(asyncio.AbstractEventLoop, None)
 
@@ -455,7 +464,7 @@ class ThreadSafeRmqTransport(RmqTransport):
 
     async def request(
         self,
-        request: RpcRequest,
+        request: Request,
         message: RawMessage,
         *,
         kwds: dict[str, Any] | None = None,
@@ -478,7 +487,7 @@ class ThreadSafeRmqTransport(RmqTransport):
 
     async def publish(
         self,
-        request: RpcRequest,
+        request: Request,
         message: RawMessage,
         *,
         kwds: dict[str, Any] | None = None,

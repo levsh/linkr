@@ -5,20 +5,28 @@ import asyncio
 import pytest
 
 from linkr import (
+    App,
     AppMiddleware,
     Depends,
     ErrorCode,
     JsonRpcSerializer,
     JsonSerializer,
-    MockTransport,
-    RpcApp,
+    LocalTransport,
     RpcError,
     WireMiddleware,
+    get_current_request,
 )
 
 
+@pytest.fixture(autouse=True)
+def _reset_transport():
+    LocalTransport.reset()
+    yield
+    LocalTransport.reset()
+
+
 class TestAppCore:
-    async def test_register_method(self, app: RpcApp):
+    async def test_register_method(self, app: App):
         @app.method("ping")
         def pong() -> str:
             return "pong"
@@ -28,25 +36,25 @@ class TestAppCore:
         assert info.name == "ping"
         assert info.fn() == "pong"
 
-    async def test_call_success(self, app: RpcApp):
+    async def test_call_success(self, app: App):
         @app.method("add")
         def add(x: int, y: int) -> int:
             return x + y
 
         await app.consume()
-        result = await app.make("add", x=2, y=3).call()
+        result = await app.make("add", x=2, y=3).invoke()
         assert result == 5
 
-    async def test_call_with_no_args(self, app: RpcApp):
+    async def test_call_with_no_args(self, app: App):
         @app.method("ping")
         def ping() -> str:
             return "pong"
 
         await app.consume()
-        result = await app.make("ping").call()
+        result = await app.make("ping").invoke()
         assert result == "pong"
 
-    async def test_call_error_from_handler(self, app: RpcApp):
+    async def test_call_error_from_handler(self, app: App):
         @app.method("fail")
         def fail() -> str:
             msg = "something went wrong"
@@ -54,21 +62,73 @@ class TestAppCore:
 
         await app.consume()
         with pytest.raises(RpcError) as exc_info:
-            await app.make("fail").call()
+            await app.make("fail").invoke()
         assert exc_info.value.error_code == ErrorCode.INTERNAL_ERROR
 
-    async def test_call_method_not_found(self, app: RpcApp):
+    async def test_custom_exception_handler_returns_rpc_error(self, app: App):
+        class CustomError(Exception):
+            pass
+
+        @app.exception_handler(CustomError)
+        def handle_custom(exc: Exception):
+            return RpcError(error_code="CustomCode", error_message=str(exc))
+
+        @app.method("raise_custom")
+        def raise_custom():
+            raise CustomError("bad stuff")
+
         await app.consume()
         with pytest.raises(RpcError) as exc_info:
-            await app.make("nonexistent").call()
+            await app.make("raise_custom").invoke()
+        assert exc_info.value.error_code == "CustomCode"
+        assert exc_info.value.error_message == "bad stuff"
+
+    async def test_custom_exception_handler_returns_tuple(self, app: App):
+        @app.exception_handler(ValueError)
+        def handle_value_error(exc: Exception):
+            return ("InvalidValueError", str(exc), {"field": "x"})
+
+        @app.method("raise_val")
+        def raise_val():
+            raise ValueError("bad val")
+
+        await app.consume()
+        with pytest.raises(RpcError) as exc_info:
+            await app.make("raise_val").invoke()
+        assert exc_info.value.error_code == "InvalidValueError"
+        assert exc_info.value.error_message == "bad val"
+        assert exc_info.value.error_details == {"field": "x"}
+
+    async def test_call_method_not_found(self, app: App):
+        await app.consume()
+        with pytest.raises(RpcError) as exc_info:
+            await app.make("nonexistent").invoke()
         assert exc_info.value.error_code == ErrorCode.METHOD_NOT_FOUND
 
-    async def test_publish(self, app: RpcApp, transport: MockTransport):
-        req = app.make("test", text="hello")
-        await app.publish(req.request)
-        assert len(transport.sent_messages) == 1
+    async def test_publish(self, app: App):
+        received = []
 
-    async def test_call_via_make_call(self, app: RpcApp):
+        @app.method("test")
+        def test_handler(text: str):
+            received.append(text)
+
+        await app.consume()
+        req = app.make("test", text="hello")
+        await app.publish(req)
+        assert received == ["hello"]
+
+    async def test_invocation_publish(self, app: App):
+        received = []
+
+        @app.method("test")
+        def test_handler(text: str):
+            received.append(text)
+
+        await app.consume()
+        await app.make("test", text="hello").publish()
+        assert received == ["hello"]
+
+    async def test_call_via_make_call(self, app: App):
         @app.method("ping")
         def ping() -> str:
             return "pong"
@@ -77,7 +137,7 @@ class TestAppCore:
         result = await app.make("ping")(timeout=5)
         assert result == "pong"
 
-    async def test_call_timeout(self, app: RpcApp):
+    async def test_call_timeout(self, app: App):
         @app.method("slow")
         async def slow() -> str:
             await asyncio.sleep(10)
@@ -85,19 +145,19 @@ class TestAppCore:
 
         await app.consume()
         with pytest.raises(RpcError) as exc_info:
-            await app.make("slow").call(timeout=0.1)
+            await app.make("slow").invoke(timeout=0.1)
         assert exc_info.value.error_code == ErrorCode.TIMEOUT
 
-    async def test_async_handler(self, app: RpcApp):
+    async def test_async_handler(self, app: App):
         @app.method("greet")
         async def greet(name: str) -> str:
             return f"Hello, {name}!"
 
         await app.consume()
-        result = await app.make("greet", name="World").call()
+        result = await app.make("greet", name="World").invoke()
         assert result == "Hello, World!"
 
-    async def test_handlerinfo_includes_signature(self, app: RpcApp):
+    async def test_handlerinfo_includes_signature(self, app: App):
         @app.method("add")
         def add(x: int, y: int = 0) -> int:
             return x + y
@@ -108,18 +168,18 @@ class TestAppCore:
         assert "y" in info.signature
         assert info.options == {}
 
-    async def test_rpc_error_from_handler_preserves_custom_code(self, app: RpcApp):
+    async def test_rpc_error_from_handler_preserves_custom_code(self, app: App):
         @app.method("auth")
         def auth(token: str) -> str:
             raise RpcError(error_code="Unauthorized", error_message="bad token")
 
         await app.consume()
         with pytest.raises(RpcError) as exc_info:
-            await app.make("auth", token="invalid").call()
+            await app.make("auth", token="invalid").invoke()
         assert exc_info.value.error_code == "Unauthorized"
         assert exc_info.value.error_message == "bad token"
 
-    async def test_rpc_error_from_middleware_preserves_custom_code(self, app: RpcApp):
+    async def test_rpc_error_from_middleware_preserves_custom_code(self, app: App):
         events: list[str] = []
 
         class AuthMiddleware(AppMiddleware):
@@ -139,7 +199,7 @@ class TestAppCore:
 
         await app.consume()
         with pytest.raises(RpcError) as exc_info:
-            await app.make("ping").call()
+            await app.make("ping").invoke()
         assert exc_info.value.error_code == "Unauthorized"
         assert exc_info.value.error_message == "access denied"
         assert exc_info.value.error_details == {"method": "ping"}
@@ -147,45 +207,45 @@ class TestAppCore:
 
 class TestAppLifecycle:
     async def test_app_is_context_manager(self):
-        transport = MockTransport()
-        async with RpcApp(transport=transport) as app:
+        transport = LocalTransport()
+        async with App(transport=transport) as app:
 
             @app.method("ping")
             def ping() -> str:
                 return "pong"
 
             await app.consume()
-            result = await app.make("ping").call()
+            result = await app.make("ping").invoke()
             assert result == "pong"
 
     async def test_call_on_closed_app_raises(self):
-        transport = MockTransport()
-        app = RpcApp(transport=transport)
+        transport = LocalTransport()
+        app = App(transport=transport)
         await app.init()
         await app.close()
-        with pytest.raises(RuntimeError, match="RpcApp is closed"):
-            await app.make("ping").call()
+        with pytest.raises(RuntimeError, match="App is closed"):
+            await app.make("ping").invoke()
 
     async def test_publish_on_closed_app_raises(self):
-        transport = MockTransport()
-        app = RpcApp(transport=transport)
+        transport = LocalTransport()
+        app = App(transport=transport)
         await app.init()
         req = app.make("test")
         await app.close()
-        with pytest.raises(RuntimeError, match="RpcApp is closed"):
-            await app.publish(req.request)
+        with pytest.raises(RuntimeError, match="App is closed"):
+            await app.publish(req)
 
     async def test_consume_on_closed_app_raises(self):
-        transport = MockTransport()
-        app = RpcApp(transport=transport)
+        transport = LocalTransport()
+        app = App(transport=transport)
         await app.init()
         await app.close()
-        with pytest.raises(RuntimeError, match="RpcApp is closed"):
+        with pytest.raises(RuntimeError, match="App is closed"):
             await app.consume()
 
     async def test_default_timeout(self):
-        transport = MockTransport()
-        app = RpcApp(transport=transport, timeout=0.1)
+        transport = LocalTransport()
+        app = App(transport=transport, timeout=0.1)
         await app.init()
 
         @app.method("slow")
@@ -195,33 +255,33 @@ class TestAppLifecycle:
 
         await app.consume()
         with pytest.raises(RpcError) as exc_info:
-            await app.make("slow").call()
+            await app.make("slow").invoke()
         assert exc_info.value.error_code == ErrorCode.TIMEOUT
 
     async def test_app_close_passes_timeout_to_transport(self):
         timeout_passed: list[float | None] = []
 
-        class SpyTransport(MockTransport):
+        class SpyTransport(LocalTransport):
             async def close(self, timeout: float | None = None) -> None:
                 timeout_passed.append(timeout)
                 await super().close(timeout=timeout)
 
         transport = SpyTransport()
-        app = RpcApp(transport=transport)
+        app = App(transport=transport)
         await app.init()
         await app.close(timeout=42.0)
         assert timeout_passed == [42.0]
 
     async def test_get_handler_returns_none_for_unknown(self):
-        transport = MockTransport()
-        app = RpcApp(transport=transport)
+        transport = LocalTransport()
+        app = App(transport=transport)
         await app.init()
 
         assert app.get_handler("nonexistent") is None
 
     async def test_get_handler_returns_info(self):
-        transport = MockTransport()
-        app = RpcApp(transport=transport)
+        transport = LocalTransport()
+        app = App(transport=transport)
         await app.init()
 
         @app.method("ping")
@@ -235,7 +295,7 @@ class TestAppLifecycle:
 
 
 class TestAppMiddleware:
-    async def test_add_middleware(self, app: RpcApp):
+    async def test_add_middleware(self, app: App):
         events: list[str] = []
 
         class TestMiddleware(AppMiddleware):
@@ -259,12 +319,12 @@ class TestAppMiddleware:
             return "pong"
 
         await app.consume()
-        result = await app.make("ping").call()
+        result = await app.make("ping").invoke()
         assert result == "pong"
         assert events.count("process_request") == 2  # client + server
         assert events.count("process_response") == 2  # server + client
 
-    async def test_multiple_middleware_order(self, app: RpcApp):
+    async def test_multiple_middleware_order(self, app: App):
         events: list[str] = []
 
         class MwA(AppMiddleware):
@@ -301,7 +361,7 @@ class TestAppMiddleware:
             return "pong"
 
         await app.consume()
-        result = await app.make("ping").call()
+        result = await app.make("ping").invoke()
         assert result == "pong"
 
         # dispatch runs A then B for client and server phases.
@@ -336,8 +396,8 @@ class TestAppMiddleware:
                 return await call_next()
 
         mw = LifecycleMiddleware()
-        transport = MockTransport()
-        async with RpcApp(transport=transport) as app:
+        transport = LocalTransport()
+        async with App(transport=transport) as app:
             app.add_middleware(mw)
             assert not mw.init_called
             assert not mw.close_called
@@ -383,8 +443,8 @@ class TestAppMiddleware:
                 events.append("B-send")
                 return result
 
-        transport = MockTransport()
-        app = RpcApp(transport=transport)
+        transport = LocalTransport()
+        app = App(transport=transport)
         app.add_middleware(MwA())
         app.add_middleware(MwB())
         await app.init()
@@ -394,7 +454,7 @@ class TestAppMiddleware:
             return "pong"
 
         await app.consume()
-        result = await app.make("ping").call()
+        result = await app.make("ping").invoke()
         assert result == "pong"
 
         # Onion pattern: outermost middleware pre runs first, post runs last.
@@ -427,8 +487,8 @@ class TestAppMiddleware:
                 server_headers.append(dict(request_raw_message.headers))
                 return await call_next()
 
-        transport = MockTransport()
-        app = RpcApp(transport=transport)
+        transport = LocalTransport()
+        app = App(transport=transport)
         app.add_middleware(HeaderInjector())
         await app.init()
 
@@ -437,7 +497,7 @@ class TestAppMiddleware:
             return "pong"
 
         await app.consume()
-        result = await app.make("ping").call()
+        result = await app.make("ping").invoke()
         assert result == "pong"
         assert server_headers[0].get("x-custom") == "test-value"
 
@@ -457,8 +517,8 @@ class TestAppMiddleware:
                 server_seen.append(request_raw_message.headers.get("x-custom", ""))
                 return await call_next()
 
-        transport = MockTransport()
-        app = RpcApp(transport=transport)
+        transport = LocalTransport()
+        app = App(transport=transport)
         app.add_middleware(CustomWireHeaderMw())
         await app.init()
 
@@ -467,59 +527,68 @@ class TestAppMiddleware:
             return "pong"
 
         await app.consume()
-        result = await app.make("ping").call()
+        result = await app.make("ping").invoke()
         assert result == "pong"
         assert server_seen[0] == "hello"
 
 
 class TestAppTimeoutsRouting:
     async def test_call_ttl_defaults_to_timeout(self):
-        transport = MockTransport()
-        app = RpcApp(transport=transport)
+        transport = LocalTransport()
+        app = App(transport=transport)
         await app.init()
+
+        headers = {}
 
         @app.method("ping")
         def ping() -> str:
+            headers.update(get_current_request().headers)
             return "pong"
 
         await app.consume()
-        result = await app.make("ping").call(timeout=5, ttl=None)
+        result = await app.make("ping").invoke(timeout=5, ttl=None)
         assert result == "pong"
-        assert transport.sent_messages[0].headers.get("ttl") == 5
-        assert transport.sent_messages[0].headers.get("timeout") == 5
+        assert headers.get("ttl") == 5
+        assert headers.get("timeout") == 5
 
     async def test_call_explicit_ttl_rttl(self):
-        transport = MockTransport()
-        app = RpcApp(transport=transport)
+        transport = LocalTransport()
+        app = App(transport=transport)
         await app.init()
+
+        headers = {}
 
         @app.method("ping")
         def ping() -> str:
+            headers.update(get_current_request().headers)
             return "pong"
 
         await app.consume()
-        result = await app.make("ping").call(ttl=30, rttl=60)
+        result = await app.make("ping").invoke(ttl=30, rttl=60)
         assert result == "pong"
-        assert transport.sent_messages[0].headers.get("ttl") == 30
-        assert transport.sent_messages[0].headers.get("rttl") == 60
-        assert "timeout" not in transport.sent_messages[0].headers
+        assert headers.get("ttl") == 30
+        assert headers.get("rttl") == 60
+        assert "timeout" not in headers
 
     async def test_default_ttl(self):
-        transport = MockTransport()
-        app = RpcApp(transport=transport, ttl=10)
+        transport = LocalTransport()
+        app = App(transport=transport, ttl=10)
         await app.init()
+
+        headers = {}
 
         @app.method("ping")
         def ping() -> str:
+            headers.update(get_current_request().headers)
             return "pong"
 
         await app.consume()
-        await app.make("ping").call()
-        assert transport.sent_messages[0].headers.get("ttl") == 10
+        await app.make("ping").invoke()
+        assert headers.get("ttl") == 10
 
     async def test_default_rttl(self):
-        transport = MockTransport()
-        app = RpcApp(transport=transport, rttl=60)
+        transport = LocalTransport()
+        app = App(transport=transport, rttl=60)
         await app.init()
 
         @app.method("ping")
@@ -527,30 +596,44 @@ class TestAppTimeoutsRouting:
             return "pong"
 
         await app.consume()
-        result = await app.make("ping").call()
+        result = await app.make("ping").invoke()
         assert result == "pong"
 
     async def test_publish_sends_ttl(self):
-        transport = MockTransport()
-        app = RpcApp(transport=transport)
+        transport = LocalTransport()
+        app = App(transport=transport)
         await app.init()
 
+        headers = {}
+
+        @app.method("test")
+        def test_handler(text: str) -> None:
+            headers.update(get_current_request().headers)
+
+        await app.consume()
         req = app.make("test", text="hello")
-        await app.publish(req.request, ttl=5)
-        assert transport.sent_messages[0].headers.get("ttl") == 5
+        await app.publish(req, ttl=5)
+        assert headers.get("ttl") == 5
 
     async def test_publish_sends_ttl_from_default(self):
-        transport = MockTransport()
-        app = RpcApp(transport=transport, ttl=7)
+        transport = LocalTransport()
+        app = App(transport=transport, ttl=7)
         await app.init()
 
+        headers = {}
+
+        @app.method("test")
+        def test_handler(text: str) -> None:
+            headers.update(get_current_request().headers)
+
+        await app.consume()
         req = app.make("test", text="hello")
-        await app.publish(req.request)
-        assert transport.sent_messages[0].headers.get("ttl") == 7
+        await app.publish(req)
+        assert headers.get("ttl") == 7
 
     async def test_routing_key_without_group(self):
-        transport = MockTransport()
-        app = RpcApp(transport=transport)
+        transport = LocalTransport()
+        app = App(transport=transport)
         await app.init()
 
         @app.method("add")
@@ -561,8 +644,8 @@ class TestAppTimeoutsRouting:
         assert call.request.headers["queue"] is None
 
     async def test_routing_key_with_group(self):
-        transport = MockTransport()
-        app = RpcApp(transport=transport)
+        transport = LocalTransport()
+        app = App(transport=transport)
         await app.init()
 
         @app.method("service/add")
@@ -573,8 +656,8 @@ class TestAppTimeoutsRouting:
         assert call.request.headers["queue"] == "service"
 
     async def test_group_method_call_success(self):
-        transport = MockTransport()
-        app = RpcApp(transport=transport)
+        transport = LocalTransport()
+        app = App(transport=transport)
         await app.init()
 
         @app.method("service/add")
@@ -582,14 +665,14 @@ class TestAppTimeoutsRouting:
             return x + y
 
         await app.consume()
-        result = await app.make("service/add", 2, 3).call()
+        result = await app.make("service/add", 2, 3).invoke()
         assert result == 5
 
 
 class TestAppValidation:
     async def test_validate_types_passes(self):
-        transport = MockTransport()
-        app = RpcApp(transport=transport)
+        transport = LocalTransport()
+        app = App(transport=transport)
         await app.init()
 
         @app.method("add", validate_types=True)
@@ -597,12 +680,12 @@ class TestAppValidation:
             return x + y
 
         await app.consume()
-        result = await app.make("add", x=2, y=3).call()
+        result = await app.make("add", x=2, y=3).invoke()
         assert result == 5
 
     async def test_validate_types_fails_positional(self):
-        transport = MockTransport()
-        app = RpcApp(transport=transport)
+        transport = LocalTransport()
+        app = App(transport=transport)
         await app.init()
 
         @app.method("add", validate_types=True)
@@ -611,12 +694,12 @@ class TestAppValidation:
 
         await app.consume()
         with pytest.raises(RpcError) as exc_info:
-            await app.make("add", "not", 3).call()
+            await app.make("add", "not", 3).invoke()
         assert exc_info.value.error_code == ErrorCode.VALIDATION_ERROR
 
     async def test_validate_types_fails_keyword(self):
-        transport = MockTransport()
-        app = RpcApp(transport=transport)
+        transport = LocalTransport()
+        app = App(transport=transport)
         await app.init()
 
         @app.method("greet", validate_types=True)
@@ -625,12 +708,12 @@ class TestAppValidation:
 
         await app.consume()
         with pytest.raises(RpcError) as exc_info:
-            await app.make("greet", name="Alice", age="old").call()
+            await app.make("greet", name="Alice", age="old").invoke()
         assert exc_info.value.error_code == ErrorCode.VALIDATION_ERROR
 
     async def test_validate_types_disabled_by_default(self):
-        transport = MockTransport()
-        app = RpcApp(transport=transport)
+        transport = LocalTransport()
+        app = App(transport=transport)
         await app.init()
 
         @app.method("add")
@@ -639,12 +722,12 @@ class TestAppValidation:
 
         await app.consume()
         with pytest.raises(RpcError) as exc_info:
-            await app.make("add", "not", 3).call()
+            await app.make("add", "not", 3).invoke()
         assert exc_info.value.error_code == ErrorCode.INTERNAL_ERROR
 
     async def test_validate_types_skips_depends(self):
-        transport = MockTransport()
-        app = RpcApp(transport=transport)
+        transport = LocalTransport()
+        app = App(transport=transport)
         app.dependencies.add_singleton(str, lambda: "injected")
         await app.init()
 
@@ -653,12 +736,12 @@ class TestAppValidation:
             return db  # type: ignore
 
         await app.consume()
-        result = await app.make("ping").call()
+        result = await app.make("ping").invoke()
         assert result == "injected"
 
     async def test_validate_types_skips_unannotated(self):
-        transport = MockTransport()
-        app = RpcApp(transport=transport)
+        transport = LocalTransport()
+        app = App(transport=transport)
         await app.init()
 
         @app.method("echo", validate_types=True)
@@ -666,12 +749,12 @@ class TestAppValidation:
             return str(x)
 
         await app.consume()
-        result = await app.make("echo", x=42).call()
+        result = await app.make("echo", x=42).invoke()
         assert result == "42"
 
     async def test_validate_types_optional(self):
-        transport = MockTransport()
-        app = RpcApp(transport=transport)
+        transport = LocalTransport()
+        app = App(transport=transport)
         await app.init()
 
         @app.method("maybe", validate_types=True)
@@ -679,12 +762,12 @@ class TestAppValidation:
             return value
 
         await app.consume()
-        result = await app.make("maybe").call()
+        result = await app.make("maybe").invoke()
         assert result is None
 
     async def test_validate_types_complex(self):
-        transport = MockTransport()
-        app = RpcApp(transport=transport)
+        transport = LocalTransport()
+        app = App(transport=transport)
         await app.init()
 
         @app.method("sum_list", validate_types=True)
@@ -701,20 +784,48 @@ class TestAppValidation:
 
         await app.consume()
 
-        result = await app.make("sum_list", values=[1, 2, 3]).call()
+        result = await app.make("sum_list", values=[1, 2, 3]).invoke()
         assert result == 6
 
-        result = await app.make("maybe").call()
+        result = await app.make("maybe").invoke()
         assert result is None
 
-        result = await app.make("maybe", value="hello").call()
+        result = await app.make("maybe", value="hello").invoke()
         assert result == "hello"
 
-        result = await app.make("identity", value=42).call()
+        result = await app.make("identity", value=42).invoke()
         assert result == 42
 
-        result = await app.make("identity", value="text").call()
+        result = await app.make("identity", value="text").invoke()
         assert result == "text"
+
+    async def test_global_validate_types_enabled(self):
+        transport = LocalTransport()
+        app = App(transport=transport, validate_types=True)
+        await app.init()
+
+        @app.method("add")
+        def add(x: int, y: int) -> int:
+            return x + y
+
+        await app.consume()
+        with pytest.raises(RpcError) as exc_info:
+            await app.make("add", "not", 3).invoke()
+        assert exc_info.value.error_code == ErrorCode.VALIDATION_ERROR
+
+    async def test_global_validate_types_override_local(self):
+        transport = LocalTransport()
+        app = App(transport=transport, validate_types=True)
+        await app.init()
+
+        @app.method("add", validate_types=False)
+        def add(x: int, y: int) -> str:
+            return str(x) + str(y)
+
+        await app.consume()
+        # Should not raise validation error when overridden locally to False
+        result = await app.make("add", "not", 3).invoke()
+        assert result == "not3"
 
 
 class TestAppMultiSerializer:
@@ -723,8 +834,8 @@ class TestAppMultiSerializer:
         assert JsonRpcSerializer().name == "jsonrpc2.0"
 
     async def test_app_default_serializer(self):
-        transport = MockTransport()
-        app = RpcApp(transport=transport)
+        transport = LocalTransport()
+        app = App(transport=transport)
         await app.init()
 
         @app.method("ping")
@@ -732,12 +843,12 @@ class TestAppMultiSerializer:
             return "pong"
 
         await app.consume()
-        result = await app.make("ping").call()
+        result = await app.make("ping").invoke()
         assert result == "pong"
 
     async def test_app_single_jsonrpc_serializer(self):
-        transport = MockTransport()
-        app = RpcApp(transport=transport, serializer=JsonRpcSerializer())
+        transport = LocalTransport()
+        app = App(transport=transport, serializer=JsonRpcSerializer())
         await app.init()
 
         @app.method("add")
@@ -745,12 +856,12 @@ class TestAppMultiSerializer:
             return x + y
 
         await app.consume()
-        result = await app.make("add", 2, 3).call()
+        result = await app.make("add", 2, 3).invoke()
         assert result == 5
 
     async def test_app_multi_serializer_call_with_name(self):
-        transport = MockTransport()
-        app = RpcApp(
+        transport = LocalTransport()
+        app = App(
             transport=transport, serializer=[JsonRpcSerializer(), JsonSerializer()]
         )
         await app.init()
@@ -760,12 +871,12 @@ class TestAppMultiSerializer:
             return "pong"
 
         await app.consume()
-        result = await app.make("ping").call(serializer="linkr1.0")
+        result = await app.make("ping").invoke(serializer="linkr1.0")
         assert result == "pong"
 
     async def test_app_multi_serializer_default_is_first(self):
-        transport = MockTransport()
-        app = RpcApp(
+        transport = LocalTransport()
+        app = App(
             transport=transport, serializer=[JsonRpcSerializer(), JsonSerializer()]
         )
         await app.init()
@@ -775,12 +886,12 @@ class TestAppMultiSerializer:
             return x + y
 
         await app.consume()
-        result = await app.make("add", 2, 3).call()
+        result = await app.make("add", 2, 3).invoke()
         assert result == 5  # default = jsonrpc2.0, server auto-detects
 
     async def test_app_multi_serializer_auto_detect(self):
-        transport = MockTransport()
-        app = RpcApp(
+        transport = LocalTransport()
+        app = App(
             transport=transport, serializer=[JsonSerializer(), JsonRpcSerializer()]
         )
         await app.init()
@@ -792,5 +903,5 @@ class TestAppMultiSerializer:
         await app.consume()
 
         # Send using jsonrpc2.0, server should auto-detect
-        result = await app.make("ping").call(serializer="jsonrpc2.0")
+        result = await app.make("ping").invoke(serializer="jsonrpc2.0")
         assert result == "pong"

@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from ..models import RawMessage, RpcRequest
+from ..models import RawMessage, Request
 
 
 class Transport(ABC):
@@ -12,7 +12,7 @@ class Transport(ABC):
     Abstract transport for RPC message exchange.
 
     Transport operates on raw bytes. Serialization and encoding are
-    handled by :class:`RpcApp` before data reaches the transport.
+    handled by :class:`App` before data reaches the transport.
 
     Implementations must provide :meth:`init`, :meth:`close`,
     :meth:`publish`, :meth:`request`, :meth:`consume`, and
@@ -56,9 +56,9 @@ class Transport(ABC):
                 fire-and-forget.
             queue: Optional routing prefix. When set, a dedicated queue
                 ``{server_queue_name}.{queue}`` is declared and consumed.
-                Used by :class:`RpcApp` to route method groups based on
+                Used by :class:`App` to route method groups based on
                 the method name prefix (e.g. ``"api/user/get"`` routes to
-                queue ``{server_queue_name}.api``).
+                queue ``{server_queue_name}.api.user``).
         """
 
     @abstractmethod
@@ -74,7 +74,7 @@ class Transport(ABC):
     @abstractmethod
     async def publish(
         self,
-        request: RpcRequest,
+        request: Request,
         message: RawMessage,
         *,
         kwds: dict[str, Any] | None = None,
@@ -83,7 +83,7 @@ class Transport(ABC):
         Publish a fire-and-forget RPC request.
 
         Args:
-            request: The original RpcRequest (for routing metadata).
+            request: The original Request (for routing metadata).
             message: The serialised request as a :class:`RawMessage`.
             kwds: Additional call context forwarded from the caller.
         """
@@ -91,7 +91,7 @@ class Transport(ABC):
     @abstractmethod
     async def request(
         self,
-        request: RpcRequest,
+        request: Request,
         message: RawMessage,
         *,
         kwds: dict[str, Any] | None = None,
@@ -100,7 +100,7 @@ class Transport(ABC):
         Send an RPC request and wait for a matching response.
 
         Args:
-            request: The original RpcRequest (for routing metadata).
+            request: The original Request (for routing metadata).
             message: The serialised request as a :class:`RawMessage`.
             kwds: Additional call context forwarded from the caller.
 

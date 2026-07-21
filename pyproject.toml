@@ -22,8 +22,10 @@ classifiers = [
 ]
 dependencies = [
     "pydantic>=2.0",
-    "rmqaio>=0.18.0",
 ]
+
+[project.optional-dependencies]
+rabbitmq = ["rmqaio>=0.18.0"]
 
 [project.urls]
 Homepage = "https://github.com/levsh/linkr"

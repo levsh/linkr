@@ -4,14 +4,14 @@ from abc import ABC
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from ..models import RawMessage, RpcRequest, RpcResponse
+from ..models import RawMessage, Request, Response
 
 
 class BaseMiddleware(ABC):
     """
     Base class for all middleware.
 
-    Provides optional lifecycle hooks that are called by :class:`RpcApp`
+    Provides optional lifecycle hooks that are called by :class:`App`
     during startup and shutdown.
     """
 
@@ -44,11 +44,11 @@ class AppMiddleware(BaseMiddleware):
 
     async def dispatch_client(
         self,
-        call_next: Callable[[], Awaitable[RpcResponse | None]],
-        request: RpcRequest,
+        call_next: Callable[[], Awaitable[Response | None]],
+        request: Request,
         *,
         kwds: dict[str, Any] | None = None,
-    ) -> RpcResponse | None:
+    ) -> Response | None:
         """
         Wrap a client-side RPC call.
 
@@ -69,11 +69,11 @@ class AppMiddleware(BaseMiddleware):
 
     async def dispatch_server(
         self,
-        call_next: Callable[[], Awaitable[RpcResponse | None]],
-        request: RpcRequest,
+        call_next: Callable[[], Awaitable[Response | None]],
+        request: Request,
         *,
         kwds: dict[str, Any] | None = None,
-    ) -> RpcResponse | None:
+    ) -> Response | None:
         """
         Wrap a server-side request handler.
 
@@ -84,6 +84,7 @@ class AppMiddleware(BaseMiddleware):
         Args:
             call_next: The next layer in the middleware chain.
             request: The incoming RPC request.
+            kwds: Additional call context forwarded from the caller.
         Returns:
             The RPC response, or ``None`` if no response is sent.
         """
@@ -110,7 +111,7 @@ class WireMiddleware(BaseMiddleware):
         self,
         call_next: Callable[[], Awaitable[RawMessage | None]],
         request_raw_message: RawMessage,
-        request: RpcRequest,
+        request: Request,
         *,
         kwds: dict[str, Any] | None = None,
     ) -> RawMessage | None:
@@ -136,11 +137,11 @@ class WireMiddleware(BaseMiddleware):
 
     async def dispatch_server(
         self,
-        call_next: Callable[[], Awaitable[tuple[RawMessage, RpcResponse] | tuple[None, None]]],
+        call_next: Callable[[], Awaitable[tuple[RawMessage, Response] | tuple[None, None]]],
         request_raw_message: RawMessage,
         *,
         kwds: dict[str, Any] | None = None,
-    ) -> tuple[RawMessage, RpcResponse] | tuple[None, None]:
+    ) -> tuple[RawMessage, Response] | tuple[None, None]:
         """
         Wrap a server-side request handler (request → dispatch → response).
 
@@ -153,10 +154,11 @@ class WireMiddleware(BaseMiddleware):
             call_next: The next layer in the wire middleware chain.
             request_raw_message: The serialised incoming request
                 (mutate in place).
+            kwds: Additional call context forwarded from the caller.
 
         Returns:
             A ``(raw_response, response)`` tuple where *raw_response* is
             the serialised response bytes and *response* is the
-            deserialised :class:`RpcResponse`.
+            deserialised :class:`Response`.
         """
         return await call_next()

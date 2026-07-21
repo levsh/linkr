@@ -4,7 +4,7 @@ from typing import get_args, get_origin
 
 import pytest
 
-from linkr import Depends, DiContainer, MockTransport, RpcApp
+from linkr import Depends, DiContainer, get_current_request
 
 
 class Database:
@@ -35,23 +35,11 @@ class TestDiContainer:
 
     def test_unknown(self) -> None:
         c = DiContainer()
-        with pytest.raises(KeyError, match="No dependency registered"):
+        with pytest.raises(KeyError, match="no dependency registered"):
             c.resolve(str)
 
 
 class TestDiWithApp:
-    @pytest.fixture
-    def transport(self):
-        t = MockTransport()
-        return t
-
-    @pytest.fixture
-    async def app(self, transport):
-        a = RpcApp(transport=transport)
-        await a.init()
-        yield a
-        await a.close()
-
     async def test_resolves_singleton(self, app, transport):
         app.dependencies.add_singleton(Database, lambda: Database("postgres://db"))
 
@@ -60,7 +48,7 @@ class TestDiWithApp:
             return db.url  # type: ignore[attr-defined]
 
         await app.consume()
-        result = await app.make("ping").call()
+        result = await app.make("ping").invoke()
         assert result == "postgres://db"
 
     async def test_with_rpc_args(self, app, transport):
@@ -71,7 +59,7 @@ class TestDiWithApp:
             return f"Hello {name} from {db.url}"  # type: ignore[attr-defined]
 
         await app.consume()
-        result = await app.make("greet", name="World").call()
+        result = await app.make("greet", name="World").invoke()
         assert result == "Hello World from postgres://db"
 
     async def test_kwds_override(self, app, transport):
@@ -85,10 +73,10 @@ class TestDiWithApp:
 
         await app.consume()
 
-        result_di = await app.make("check").call()
+        result_di = await app.make("check").invoke()
         assert result_di == "DI:preview"
 
-        result_override = await app.make("check", db="manual").call()
+        result_override = await app.make("check", db="manual").invoke()
         assert result_override == "override:manual"
 
     async def test_no_deps_still_works(self, app, transport):
@@ -98,7 +86,7 @@ class TestDiWithApp:
             return "pong"
 
         await app.consume()
-        result = await app.make("ping").call()
+        result = await app.make("ping").invoke()
         assert result == "pong"
 
     async def test_handler_without_annotation(self, app, transport):
@@ -109,7 +97,7 @@ class TestDiWithApp:
             return value
 
         await app.consume()
-        result = await app.make("echo", value="hello").call()
+        result = await app.make("echo", value="hello").invoke()
         assert result == "hello"
 
     async def test_multiple_deps(self, app, transport):
@@ -121,5 +109,30 @@ class TestDiWithApp:
             return f"{db.url}/{cfg.env}"  # type: ignore[attr-defined]
 
         await app.consume()
-        result = await app.make("status").call()
+        result = await app.make("status").invoke()
         assert result == "postgres://db/production"
+
+
+class RequestContext:
+    def __init__(self, req_id: str) -> None:
+        self.req_id = req_id
+
+
+class TestDiScoped:
+    def test_scoped_outside_request_raises(self) -> None:
+        c = DiContainer()
+        c.add_scoped(RequestContext, lambda: RequestContext("123"))
+        with pytest.raises(RuntimeError, match="Cannot resolve scoped dependency"):
+            c.resolve(RequestContext)
+
+    async def test_scoped_dependency_in_app(self, app, transport):
+        app.dependencies.add_scoped(RequestContext, lambda: RequestContext(str(get_current_request().id)))
+
+        @app.method("get_id")
+        def get_id(ctx: Depends[RequestContext]) -> str:
+            return ctx.req_id  # type: ignore[attr-defined]
+
+        await app.consume()
+        req = app.make("get_id")
+        result = await req.invoke()
+        assert result == str(req.request.id)

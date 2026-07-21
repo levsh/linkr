@@ -14,7 +14,7 @@ class RpcError(Exception):
     """
     Structured RPC error returned by the server.
 
-    Raised by :meth:`RpcApp.call` when the server response contains an
+    Raised by :meth:`App.call` when the server response contains an
     error payload.
 
     Attributes:

@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import gzip
 
-from linkr import MockTransport, RpcApp
+from linkr import App, LocalTransport
 from linkr.middleware.gzip import GzipMiddleware
-from linkr.models import RawMessage, RpcRequest, RpcResponse
+from linkr.models import RawMessage, Request, Response
 
 
 class TestGzipMiddleware:
@@ -16,7 +16,7 @@ class TestGzipMiddleware:
     async def test_small_request_not_compressed(self):
         mw = GzipMiddleware()
         raw = RawMessage(data=self.SMALL, headers={})
-        request = RpcRequest(method="test", args=(), kwds={})
+        request = Request(method="test", args=(), kwds={})
 
         async def call_next() -> RawMessage | None:
             return RawMessage(data=b"ok", headers={})
@@ -28,7 +28,7 @@ class TestGzipMiddleware:
     async def test_large_request_compressed(self):
         mw = GzipMiddleware()
         raw = RawMessage(data=self.LARGE, headers={})
-        request = RpcRequest(method="test", args=(), kwds={})
+        request = Request(method="test", args=(), kwds={})
 
         async def call_next() -> RawMessage | None:
             return RawMessage(data=b"ok", headers={})
@@ -41,7 +41,7 @@ class TestGzipMiddleware:
     async def test_client_decompresses_response(self):
         mw = GzipMiddleware()
         raw = RawMessage(data=b"tiny", headers={})
-        request = RpcRequest(method="test", args=(), kwds={})
+        request = Request(method="test", args=(), kwds={})
         compressed = gzip.compress(self.LARGE)
 
         async def call_next() -> RawMessage | None:
@@ -55,10 +55,10 @@ class TestGzipMiddleware:
         mw = GzipMiddleware()
         compressed = gzip.compress(self.LARGE)
         raw = RawMessage(data=compressed, headers={"content_encoding": "gzip"})
-        req = RpcRequest(method="test", args=(), kwds={})
-        response = RpcResponse(id=req.id, type="result", data={"result": "ok"})
+        req = Request(method="test", args=(), kwds={})
+        response = Response(id=req.id, type="result", data={"result": "ok"})
 
-        async def call_next() -> tuple[RawMessage, RpcResponse] | tuple[None, None]:
+        async def call_next() -> tuple[RawMessage, Response] | tuple[None, None]:
             return RawMessage(data=b"ok", headers={}), response
 
         await mw.dispatch_server(call_next, raw)
@@ -69,10 +69,10 @@ class TestGzipMiddleware:
         mw = GzipMiddleware()
         raw = RawMessage(data=b"small", headers={})
         large_data = b"y" * 2000
-        req = RpcRequest(method="test", args=(), kwds={})
-        response = RpcResponse(id=req.id, type="result", data={"result": "large"})
+        req = Request(method="test", args=(), kwds={})
+        response = Response(id=req.id, type="result", data={"result": "large"})
 
-        async def call_next() -> tuple[RawMessage, RpcResponse] | tuple[None, None]:
+        async def call_next() -> tuple[RawMessage, Response] | tuple[None, None]:
             return RawMessage(data=large_data, headers={}), response
 
         raw_resp, resp = await mw.dispatch_server(call_next, raw)
@@ -85,7 +85,7 @@ class TestGzipMiddleware:
         mw = GzipMiddleware()
         raw = RawMessage(data=b"small", headers={})
 
-        async def call_next() -> tuple[RawMessage, RpcResponse] | tuple[None, None]:
+        async def call_next() -> tuple[RawMessage, Response] | tuple[None, None]:
             return None, None
 
         result = await mw.dispatch_server(call_next, raw)
@@ -94,7 +94,7 @@ class TestGzipMiddleware:
     async def test_custom_min_size(self):
         mw = GzipMiddleware(min_size=1)
         raw = RawMessage(data=b"x", headers={})
-        request = RpcRequest(method="test", args=(), kwds={})
+        request = Request(method="test", args=(), kwds={})
 
         async def call_next() -> RawMessage | None:
             return RawMessage(data=b"ok", headers={})
@@ -106,7 +106,7 @@ class TestGzipMiddleware:
     async def test_existing_content_encoding_merged(self):
         mw = GzipMiddleware()
         raw = RawMessage(data=self.LARGE, headers={"content_encoding": "custom"})
-        request = RpcRequest(method="test", args=(), kwds={})
+        request = Request(method="test", args=(), kwds={})
 
         async def call_next() -> RawMessage | None:
             return RawMessage(data=b"ok", headers={})
@@ -120,10 +120,10 @@ class TestGzipMiddleware:
         mw = GzipMiddleware()
         large_data = b"z" * 2000
         raw = RawMessage(data=b"small", headers={})
-        req = RpcRequest(method="test", args=(), kwds={})
-        response = RpcResponse(id=req.id, type="result", data={"result": "large"})
+        req = Request(method="test", args=(), kwds={})
+        response = Response(id=req.id, type="result", data={"result": "large"})
 
-        async def call_next() -> tuple[RawMessage, RpcResponse] | tuple[None, None]:
+        async def call_next() -> tuple[RawMessage, Response] | tuple[None, None]:
             return RawMessage(data=large_data, headers={"content_encoding": "custom"}), response
 
         raw_resp, _ = await mw.dispatch_server(call_next, raw)
@@ -134,11 +134,11 @@ class TestGzipMiddleware:
 
 
 class TestGzipMiddlewareWithApp:
-    """Integration tests for GzipMiddleware through the full RpcApp pipeline."""
+    """Integration tests for GzipMiddleware through the full App pipeline."""
 
     async def test_gzip_roundtrip_small_payload(self):
-        transport = MockTransport()
-        app = RpcApp(transport=transport)
+        transport = LocalTransport()
+        app = App(transport=transport)
         app.add_middleware(GzipMiddleware())
         await app.init()
 
@@ -147,13 +147,13 @@ class TestGzipMiddlewareWithApp:
             return "pong"
 
         await app.consume()
-        result = await app.make("ping").call()
+        result = await app.make("ping").invoke()
         assert result == "pong"
         await app.close()
 
     async def test_gzip_large_request(self):
-        transport = MockTransport()
-        app = RpcApp(transport=transport)
+        transport = LocalTransport()
+        app = App(transport=transport)
         app.add_middleware(GzipMiddleware())
         await app.init()
 
@@ -163,13 +163,13 @@ class TestGzipMiddlewareWithApp:
 
         large = "x" * 2000
         await app.consume()
-        result = await app.make("echo", data=large).call()
+        result = await app.make("echo", data=large).invoke()
         assert result == large
         await app.close()
 
     async def test_gzip_large_response(self):
-        transport = MockTransport()
-        app = RpcApp(transport=transport)
+        transport = LocalTransport()
+        app = App(transport=transport)
         app.add_middleware(GzipMiddleware())
         await app.init()
 
@@ -178,13 +178,13 @@ class TestGzipMiddlewareWithApp:
             return "y" * 2000
 
         await app.consume()
-        result = await app.make("get_large").call()
+        result = await app.make("get_large").invoke()
         assert result == "y" * 2000
         await app.close()
 
     async def test_gzip_add_middleware_appends(self):
-        transport = MockTransport()
-        app = RpcApp(transport=transport)
+        transport = LocalTransport()
+        app = App(transport=transport)
         assert len(app._wire_mw) == 0
         app.add_middleware(GzipMiddleware())
         assert len(app._wire_mw) == 1

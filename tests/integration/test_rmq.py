@@ -1,7 +1,8 @@
 import asyncio
 
 import pytest
-from linkr.app import RpcApp
+
+from linkr.app import App
 from linkr.exceptions import ErrorCode, RpcError
 from linkr.serializer import JsonRpcSerializer, JsonSerializer
 from linkr.transports.rmq import RmqTransport, ThreadSafeRmqTransport
@@ -11,7 +12,7 @@ from linkr.transports.rmq import RmqTransport, ThreadSafeRmqTransport
 class TestRMQ:
     async def test_base(self, rabbitmq):
         transport = RmqTransport(f"amqp://{rabbitmq['ip']}")
-        rpc = RpcApp(transport)
+        rpc = App(transport)
 
         @rpc.method("add")
         def add(a, b):
@@ -21,7 +22,7 @@ class TestRMQ:
         try:
             await rpc.consume()
 
-            result = await rpc.make("add", 1, 2).call()
+            result = await rpc.make("add", 1, 2).invoke()
 
             assert result == 3
         finally:
@@ -29,7 +30,7 @@ class TestRMQ:
 
     async def test_path(self, rabbitmq):
         transport = RmqTransport(f"amqp://{rabbitmq['ip']}")
-        rpc = RpcApp(transport)
+        rpc = App(transport)
 
         @rpc.method("service/add")
         def add(a, b):
@@ -39,7 +40,7 @@ class TestRMQ:
         try:
             await rpc.consume()
 
-            result = await rpc.make("service/add", 1, 2).call()
+            result = await rpc.make("service/add", 1, 2).invoke()
 
             assert result == 3
         finally:
@@ -47,7 +48,7 @@ class TestRMQ:
 
     async def test_timeout(self, rabbitmq):
         transport = RmqTransport(f"amqp://{rabbitmq['ip']}")
-        rpc = RpcApp(transport)
+        rpc = App(transport)
 
         @rpc.method("service/add")
         async def add(a, b):
@@ -59,7 +60,7 @@ class TestRMQ:
             await rpc.consume()
 
             with pytest.raises(RpcError) as exc_info:
-                await rpc.make("service/add", 1, 2).call(timeout=1)
+                await rpc.make("service/add", 1, 2).invoke(timeout=1)
             assert exc_info.value.error_code == ErrorCode.TIMEOUT
         finally:
             await rpc.close()
@@ -69,7 +70,7 @@ class TestRMQ:
 class TestThreadSafeRMQ:
     async def test_request_from_owner_loop(self, rabbitmq):
         transport = ThreadSafeRmqTransport(f"amqp://{rabbitmq['ip']}")
-        rpc = RpcApp(transport)
+        rpc = App(transport)
 
         @rpc.method("ping")
         def ping() -> str:
@@ -78,14 +79,14 @@ class TestThreadSafeRMQ:
         await rpc.init()
         try:
             await rpc.consume()
-            result = await rpc.make("ping").call()
+            result = await rpc.make("ping").invoke()
             assert result == "pong"
         finally:
             await rpc.close()
 
     async def test_request_from_different_loop(self, rabbitmq):
         transport = ThreadSafeRmqTransport(f"amqp://{rabbitmq['ip']}")
-        rpc = RpcApp(transport)
+        rpc = App(transport)
 
         @rpc.method("add")
         def add(x: int, y: int) -> int:
@@ -96,7 +97,7 @@ class TestThreadSafeRMQ:
             await rpc.consume()
 
             def make_call():
-                return asyncio.run(rpc.make("add", 2, 3).call())
+                return asyncio.run(rpc.make("add", 2, 3).invoke())
 
             loop = asyncio.get_running_loop()
             result = await loop.run_in_executor(None, make_call)
@@ -106,7 +107,7 @@ class TestThreadSafeRMQ:
 
     async def test_publish_from_different_loop(self, rabbitmq):
         transport = ThreadSafeRmqTransport(f"amqp://{rabbitmq['ip']}")
-        rpc = RpcApp(transport)
+        rpc = App(transport)
 
         @rpc.method("ping")
         def ping() -> str:
@@ -119,7 +120,7 @@ class TestThreadSafeRMQ:
             def do_publish():
                 async def publish():
                     req = rpc.make("ping")
-                    await rpc.publish(req.request)
+                    await rpc.publish(req)
 
                 asyncio.run(publish())
 
@@ -130,7 +131,7 @@ class TestThreadSafeRMQ:
 
     async def test_nested_rpc_call_from_handler(self, rabbitmq):
         transport = ThreadSafeRmqTransport(f"amqp://{rabbitmq['ip']}")
-        rpc = RpcApp(transport)
+        rpc = App(transport)
 
         @rpc.method("inner")
         def inner(x: int) -> int:
@@ -139,7 +140,7 @@ class TestThreadSafeRMQ:
         @rpc.method("outer")
         async def outer(value: int) -> int:
             result = await asyncio.to_thread(
-                lambda: asyncio.run(rpc.make("inner", value).call()),
+                lambda: asyncio.run(rpc.make("inner", value).invoke()),
             )
             return result
 
@@ -147,14 +148,14 @@ class TestThreadSafeRMQ:
         try:
             await rpc.consume()
 
-            result = await rpc.make("outer", 21).call()
+            result = await rpc.make("outer", 21).invoke()
             assert result == 42
         finally:
             await rpc.close()
 
     async def test_concurrent_requests_from_multiple_loops(self, rabbitmq):
         transport = ThreadSafeRmqTransport(f"amqp://{rabbitmq['ip']}")
-        rpc = RpcApp(transport)
+        rpc = App(transport)
 
         @rpc.method("echo")
         def echo(value: str) -> str:
@@ -166,7 +167,7 @@ class TestThreadSafeRMQ:
 
             async def call_in_thread(value: str) -> str:
                 return await asyncio.to_thread(
-                    lambda: asyncio.run(rpc.make("echo", value=value).call()),
+                    lambda: asyncio.run(rpc.make("echo", value=value).invoke()),
                 )
 
             results = await asyncio.gather(
@@ -182,7 +183,7 @@ class TestThreadSafeRMQ:
 class TestJsonRpcOverRMQ:
     async def test_positional_args(self, rabbitmq):
         transport = RmqTransport(f"amqp://{rabbitmq['ip']}")
-        rpc = RpcApp(transport, serializer=JsonRpcSerializer())
+        rpc = App(transport, serializer=JsonRpcSerializer())
 
         @rpc.method("add")
         def add(a, b):
@@ -191,14 +192,14 @@ class TestJsonRpcOverRMQ:
         await rpc.init()
         try:
             await rpc.consume()
-            result = await rpc.make("add", 2, 3).call()
+            result = await rpc.make("add", 2, 3).invoke()
             assert result == 5
         finally:
             await rpc.close()
 
     async def test_keyword_args(self, rabbitmq):
         transport = RmqTransport(f"amqp://{rabbitmq['ip']}")
-        rpc = RpcApp(transport, serializer=JsonRpcSerializer())
+        rpc = App(transport, serializer=JsonRpcSerializer())
 
         @rpc.method("greet")
         def greet(name: str) -> str:
@@ -207,27 +208,27 @@ class TestJsonRpcOverRMQ:
         await rpc.init()
         try:
             await rpc.consume()
-            result = await rpc.make("greet", name="World").call()
+            result = await rpc.make("greet", name="World").invoke()
             assert result == "Hello, World!"
         finally:
             await rpc.close()
 
     async def test_error_method_not_found(self, rabbitmq):
         transport = RmqTransport(f"amqp://{rabbitmq['ip']}")
-        rpc = RpcApp(transport, serializer=JsonRpcSerializer())
+        rpc = App(transport, serializer=JsonRpcSerializer())
 
         await rpc.init()
         try:
             await rpc.consume()
             with pytest.raises(RpcError) as exc_info:
-                await rpc.make("nonexistent").call()
+                await rpc.make("nonexistent").invoke()
             assert exc_info.value.error_code == ErrorCode.METHOD_NOT_FOUND
         finally:
             await rpc.close()
 
     async def test_error_handler_raises(self, rabbitmq):
         transport = RmqTransport(f"amqp://{rabbitmq['ip']}")
-        rpc = RpcApp(transport, serializer=JsonRpcSerializer())
+        rpc = App(transport, serializer=JsonRpcSerializer())
 
         @rpc.method("fail")
         def fail() -> str:
@@ -238,14 +239,14 @@ class TestJsonRpcOverRMQ:
         try:
             await rpc.consume()
             with pytest.raises(RpcError) as exc_info:
-                await rpc.make("fail").call()
+                await rpc.make("fail").invoke()
             assert exc_info.value.error_code == ErrorCode.INTERNAL_ERROR
         finally:
             await rpc.close()
 
     async def test_auto_detect(self, rabbitmq):
         transport = RmqTransport(f"amqp://{rabbitmq['ip']}")
-        rpc = RpcApp(transport, serializer=[JsonRpcSerializer(), JsonSerializer()])
+        rpc = App(transport, serializer=[JsonRpcSerializer(), JsonSerializer()])
 
         @rpc.method("ping")
         def ping() -> str:
@@ -254,7 +255,7 @@ class TestJsonRpcOverRMQ:
         await rpc.init()
         try:
             await rpc.consume()
-            result = await rpc.make("ping").call(serializer="jsonrpc2.0")
+            result = await rpc.make("ping").invoke(serializer="jsonrpc2.0")
             assert result == "pong"
         finally:
             await rpc.close()

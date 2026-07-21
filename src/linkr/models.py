@@ -14,9 +14,9 @@ class ErrorInfo(BaseModel):
     error_details: dict[str, Any] | None = None
 
 
-class RpcRequest(BaseModel):
+class Request(BaseModel):
     """
-    RPC request message.
+    Request message — used for both RPC calls and pub-sub events.
 
     Attributes:
         id: Unique request identifier.
@@ -33,12 +33,13 @@ class RpcRequest(BaseModel):
     headers: dict[str, Any] = Field(default_factory=dict)
 
 
-class RpcResponse(BaseModel):
+class Response(BaseModel):
     """
-    RPC response message.
+    Response message — returned for RPC calls; ``None`` for pub-sub.
 
     Attributes:
         id: Mirrors the corresponding request id.
+        type: Response type — ``"result"`` or ``"error"``.
         data: Result payload or error fields (error_code, error_message, error_details).
         headers: Arbitrary metadata.
     """
@@ -56,7 +57,7 @@ class HandlerInfo:
 
     Attributes:
         name: Method name as registered via @app.method().
-        func: Callable implementing the handler.
+        fn: Callable implementing the handler.
         signature: String representation of the handler signature.
         options: Arbitrary keyword options passed to @app.method().
         dep_types: Mapping of parameter name to dependency type resolved

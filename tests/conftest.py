@@ -8,22 +8,25 @@ import pytest
 import rmqaio
 from docker.errors import DockerException
 
-from linkr import MockTransport, RpcApp
+from linkr import App, LocalTransport
 from tests import utils
 
 
 @pytest.fixture
 async def transport():
-    t = MockTransport()
+    LocalTransport.reset()
+    t = LocalTransport()
     await t.init()
     yield t
     await t.close()
+    LocalTransport.reset()
 
 
 @pytest.fixture
-async def app(transport: MockTransport):
-    a = RpcApp(transport=transport)
+async def app(transport: LocalTransport):
+    a = App(transport=transport)
     await a.init()
+    await a.consume()
     yield a
     await a.close()
 

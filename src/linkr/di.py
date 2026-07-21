@@ -1,9 +1,28 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextvars import ContextVar
 from typing import Any, Generic, TypeVar
 
+from .models import Request
+
 T = TypeVar("T")
+
+_current_request: ContextVar[Request | None] = ContextVar("linkr_current_request", default=None)
+_request_instances: ContextVar[dict[type, Any] | None] = ContextVar("linkr_request_instances", default=None)
+
+
+def get_current_request() -> Request:
+    """
+    Get the current RPC request being dispatched in this async context.
+
+    Raises:
+        RuntimeError: If called outside of an active RPC request dispatch.
+    """
+    req = _current_request.get()
+    if req is None:
+        raise RuntimeError("No active RPC request in current context")
+    return req
 
 
 class Depends(Generic[T]):
@@ -47,6 +66,7 @@ class DiContainer:
         """
         self._singletons: dict[type, Any] = {}
         self._singleton_factories: dict[type, Callable[[], Any]] = {}
+        self._scoped_factories: dict[type, Callable[[], Any]] = {}
         self._transients: dict[type, Callable[[], Any]] = {}
 
     def add_singleton(self, type_: type, factory: Callable[[], Any]) -> None:
@@ -56,11 +76,28 @@ class DiContainer:
         The factory is called once on first resolve and the result is
         cached for all future resolutions.
 
+        Calling this method again for the same *type_* replaces the
+        factory and invalidates any previously cached instance.
+
         Args:
             type_: The dependency type used in Depends[T].
             factory: A zero-argument callable that produces the instance.
         """
+        self._singletons.pop(type_, None)
         self._singleton_factories[type_] = factory
+
+    def add_scoped(self, type_: type, factory: Callable[[], Any]) -> None:
+        """
+        Register a request-scoped dependency.
+
+        The factory is called once per request and the instance is cached
+        for the duration of that request.
+
+        Args:
+            type_: The dependency type used in Depends[T].
+            factory: A zero-argument callable that produces the instance.
+        """
+        self._scoped_factories[type_] = factory
 
     def add_transient(self, type_: type, factory: Callable[[], Any]) -> None:
         """
@@ -97,7 +134,17 @@ class DiContainer:
             del self._singleton_factories[type_]
             return instance
 
+        if type_ in self._scoped_factories:
+            instances = _request_instances.get()
+            if instances is None:
+                raise RuntimeError(f"Cannot resolve scoped dependency {type_} outside of an active request context")
+            if type_ in instances:
+                return instances[type_]
+            instance = self._scoped_factories[type_]()
+            instances[type_] = instance
+            return instance
+
         factory = self._transients.get(type_)
         if factory is None:
-            raise KeyError(f"No dependency registered for {type_}")
+            raise KeyError(f"no dependency registered for {type_}")
         return factory()

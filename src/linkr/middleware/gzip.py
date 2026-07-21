@@ -4,7 +4,7 @@ import gzip
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from ..models import RawMessage, RpcRequest, RpcResponse
+from ..models import RawMessage, Request, Response
 from . import WireMiddleware
 
 
@@ -34,7 +34,7 @@ class GzipMiddleware(WireMiddleware):
         self,
         call_next: Callable[[], Awaitable[RawMessage | None]],
         request_raw_message: RawMessage,
-        request: RpcRequest,
+        request: Request,
         *,
         kwds: dict[str, Any] | None = None,
     ) -> RawMessage | None:
@@ -58,11 +58,11 @@ class GzipMiddleware(WireMiddleware):
 
     async def dispatch_server(
         self,
-        call_next: Callable[[], Awaitable[tuple[RawMessage, RpcResponse] | tuple[None, None]]],
+        call_next: Callable[[], Awaitable[tuple[RawMessage, Response] | tuple[None, None]]],
         request_raw_message: RawMessage,
         *,
         kwds: dict[str, Any] | None = None,
-    ) -> tuple[RawMessage, RpcResponse] | tuple[None, None]:
+    ) -> tuple[RawMessage, Response] | tuple[None, None]:
         """
         Decompress incoming request, compress outgoing response.
 

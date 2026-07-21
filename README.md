@@ -1,6 +1,6 @@
 # linkr
 
-Async RPC framework.
+Async messaging framework — RPC and publish/subscribe.
 
 ## Install
 
@@ -11,10 +11,10 @@ pip install linkr
 ## Quickstart
 
 ```python
-from linkr import MockTransport, RpcApp
+from linkr import LocalTransport, App
 
-transport = MockTransport()
-app = RpcApp(transport)
+transport = LocalTransport()
+app = App(transport)
 
 @app.method("add")
 def add(x: int, y: int) -> int:
@@ -23,7 +23,7 @@ def add(x: int, y: int) -> int:
 await app.init()
 await app.consume()
 
-result = await app.make("add", 2, 3).call()
+result = await app.make("add", 2, 3).invoke()
 print(result)  # 5
 
 await app.close()
@@ -51,18 +51,18 @@ import logging
 
 from typing import Any
 
-from linkr import AppMiddleware, MockTransport, RpcApp
-from linkr.models import RpcRequest, RpcResponse
+from linkr import AppMiddleware, LocalTransport, App
+from linkr.models import Request, Response
 
 
 class LoggingMiddleware(AppMiddleware):
     async def dispatch_client(
         self,
         call_next,
-        request: RpcRequest,
+        request: Request,
         *,
         kwds: dict[str, Any] | None = None,
-    ) -> RpcResponse | None:
+    ) -> Response | None:
         logging.info("[%s] Calling %s", request.id, request.method)
         response = await call_next()
         if response:
@@ -72,10 +72,10 @@ class LoggingMiddleware(AppMiddleware):
     async def dispatch_server(
         self,
         call_next,
-        request: RpcRequest,
+        request: Request,
         *,
         kwds: dict[str, Any] | None = None,
-    ) -> RpcResponse | None:
+    ) -> Response | None:
         logging.info("[%s] Calling %s", request.id, request.method)
         response = await call_next()
         if response:
@@ -83,7 +83,7 @@ class LoggingMiddleware(AppMiddleware):
         return response
 
 
-app = RpcApp(MockTransport())
+app = App(LocalTransport())
 app.add_middleware(LoggingMiddleware())
 ```
 
@@ -105,7 +105,7 @@ import gzip
 from typing import Any
 
 from linkr import WireMiddleware
-from linkr.models import RawMessage, RpcRequest, RpcResponse
+from linkr.models import RawMessage, Request, Response
 
 
 class CustomCompression(WireMiddleware):
@@ -113,7 +113,7 @@ class CustomCompression(WireMiddleware):
         self,
         call_next,
         request_raw_message: RawMessage,
-        request: RpcRequest,
+        request: Request,
         *,
         kwds: dict[str, Any] | None = None,
     ) -> RawMessage | None:
@@ -130,7 +130,7 @@ class CustomCompression(WireMiddleware):
         request_raw_message: RawMessage,
         *,
         kwds: dict[str, Any] | None = None,
-    ) -> tuple[RawMessage, RpcResponse] | tuple[None, None]:
+    ) -> tuple[RawMessage, Response] | tuple[None, None]:
         if request_raw_message.headers.get("content_encoding") == "gzip":
             request_raw_message.data = gzip.decompress(request_raw_message.data)
         result = await call_next()
@@ -145,7 +145,7 @@ class CustomCompression(WireMiddleware):
 ## Dependency Injection
 
 ```python
-from linkr import Depends, MockTransport, RpcApp
+from linkr import Depends, LocalTransport, App
 
 
 class Database:
@@ -153,8 +153,8 @@ class Database:
         self.url = url
 
 
-transport = MockTransport()
-async with RpcApp(transport) as app:
+transport = LocalTransport()
+async with App(transport) as app:
     app.dependencies.add_singleton(Database, lambda: Database("postgres://..."))
 
     @app.method("ping")
@@ -162,7 +162,7 @@ async with RpcApp(transport) as app:
         return db.url
 
     await app.consume()
-    result = await app.make("ping").call()
+    result = await app.make("ping").invoke()
     print(result)  # postgres://...
 ```
 
@@ -171,17 +171,17 @@ async with RpcApp(transport) as app:
 Type validation is enabled via ``validate_types=True``:
 
 ```python
-from linkr import MockTransport, RpcApp, RpcError
+from linkr import LocalTransport, App, RpcError
 
-transport = MockTransport()
-async with RpcApp(transport) as app:
+transport = LocalTransport()
+async with App(transport) as app:
     @app.method("add", validate_types=True)
     def add(x: int, y: int) -> int:
         return x + y
 
     await app.consume()
     try:
-        await app.make("add", x="not", y=3).call()
+        await app.make("add", x="not", y=3).invoke()
     except RpcError as e:
         print(e.error_code)     # ValidationError
         print(e.error_message)  # x: Input should be a valid integer
@@ -192,10 +192,10 @@ async with RpcApp(transport) as app:
 Send a message without waiting for a response:
 
 ```python
-from linkr import MockTransport, RpcApp
+from linkr import LocalTransport, App
 
-transport = MockTransport()
-async with RpcApp(transport) as app:
+transport = LocalTransport()
+async with App(transport) as app:
     req = app.make("event", text="hello")
     await app.publish(req.request)
 ```
@@ -204,7 +204,7 @@ async with RpcApp(transport) as app:
 
 | Transport             | When to use                |
 |-----------------------|----------------------------|
-| MockTransport         | Unit tests, local dev      |
+| LocalTransport        | Local dev, in-process app  |
 | RmqTransport          | Production (RabbitMQ)      |
 | ThreadSafeRmqTransport| Cross-event-loop usage     |
 
