@@ -10,10 +10,7 @@ from typing import Any, TypeVar, cast
 try:
     from rmqaio import BindSpec, ConsumerSpec, ExchangeSpec, Ops, QueueSpec, Repeat, RetryPolicy, SharedConnection
 except ImportError as e:
-    raise ImportError(
-        "Missing optional dependency 'rmqaio'. "
-        "Install it with: pip install linkr[rabbitmq]"
-    ) from e
+    raise ImportError("Missing optional dependency 'rmqaio'. Install it with: pip install linkr[rabbitmq]") from e
 
 from ..models import RawMessage, Request
 from . import Transport
@@ -231,7 +228,7 @@ class RmqTransport(Transport):
 
         with suppress(asyncio.TimeoutError):
             if self._pending:
-                done, pending = await asyncio.wait(list(self._pending.values()), timeout=_left())
+                _, pending = await asyncio.wait(list(self._pending.values()), timeout=_left())
                 for fut in pending:
                     fut.cancel()
             self._pending.clear()

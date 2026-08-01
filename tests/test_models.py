@@ -50,7 +50,12 @@ class TestRpcModels:
         assert restored.data == resp.data
 
     def test_response_headersonly(self):
-        resp = Response(id=UUID("00000000-0000-0000-0000-000000000001"), type="result", data=None, headers={"x-custom": "val"})
+        resp = Response(
+            id=UUID("00000000-0000-0000-0000-000000000001"),
+            type="result",
+            data=None,
+            headers={"x-custom": "val"},
+        )
         assert resp.headers["x-custom"] == "val"
 
     def test_response_invalid_id(self):

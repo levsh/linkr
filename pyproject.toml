@@ -81,3 +81,21 @@ asyncio_mode = "auto"
 markers = [
     "integration: tests that require external services like Docker",
 ]
+
+[tool.pylint.messages_control]
+disable = [
+    "missing-module-docstring",
+    "missing-class-docstring",
+    "broad-exception-caught",
+    "too-few-public-methods",
+    "too-many-instance-attributes",
+    "too-many-arguments",
+    "too-many-locals",
+    "too-many-return-statements",
+    "too-many-branches",
+    "unused-argument",
+]
+
+[tool.pylint.format]
+max-line-length = 120
+

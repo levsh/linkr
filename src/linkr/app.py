@@ -451,9 +451,7 @@ class App:
             await wire_mw.close()
 
         if self._subscriber_tasks:
-            done, pending = await asyncio.wait(
-                self._subscriber_tasks, timeout=timeout
-            )
+            _, pending = await asyncio.wait(self._subscriber_tasks, timeout=timeout)
             for task in pending:
                 task.cancel()
 
