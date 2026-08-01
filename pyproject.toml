@@ -4,7 +4,7 @@ version = "0.3.2"
 description = "Async RPC framework with middleware support"
 readme = "README.md"
 requires-python = ">=3.11,<4"
-license = { text = "MIT" }
+license = "MIT"
 keywords = ["rpc", "async", "framework", "rabbitmq", "amqp", "middleware"]
 authors = [
     { name = "Roman Koshel", email = "roma.koshel@gmail.com" },
@@ -12,7 +12,6 @@ authors = [
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -38,6 +37,7 @@ python = ">=3.11,<4.0"
 [tool.poetry.group.test.dependencies]
 docker = "*"
 mypy = "*"
+pylint = "*"
 pytest = "*"
 pytest-asyncio = "*"
 pytest-cov = "*"
