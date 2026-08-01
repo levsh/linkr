@@ -41,7 +41,7 @@ await app.close()
 - Pydantic serialization
 - JSON-RPC 2.0 support via `JsonRpcSerializer`
 - Multi-serializer with auto-detection
-- Mock transport for testing (no broker needed)
+- Local transport for in-process testing (`LocalTransport`)
 - RabbitMQ transport
 
 ## App-level Middleware
@@ -197,7 +197,7 @@ from linkr import LocalTransport, App
 transport = LocalTransport()
 async with App(transport) as app:
     req = app.make("event", text="hello")
-    await app.publish(req.request)
+    await app.publish(req)
 ```
 
 ## Transports
@@ -206,7 +206,6 @@ async with App(transport) as app:
 |-----------------------|----------------------------|
 | LocalTransport        | Local dev, in-process app  |
 | RmqTransport          | Production (RabbitMQ)      |
-| ThreadSafeRmqTransport| Cross-event-loop usage     |
 
 ## License
 
