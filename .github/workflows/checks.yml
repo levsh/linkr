@@ -25,16 +25,16 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         python -m pip install poetry
-        poetry install
+        poetry install --with test --extras rabbitmq
     - name: Prepare images
       run: |
         docker pull rabbitmq:3-management
-    - name: Lint with ruff
+    - name: Lint
       run: |
-        poetry run ruff check src/linkr/
-    - name: Type check with mypy
+        make lint
+    - name: Type check
       run: |
-        poetry run mypy --config-file pyproject.toml src/linkr/
+        make typecheck
     - name: Run test
       run: |
-        poetry run pytest tests -vv
+        make test

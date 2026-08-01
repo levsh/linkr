@@ -16,4 +16,4 @@ typecheck:
 	poetry run mypy src
 
 test:
-	poetry run pytest
+	poetry run pytest -v
