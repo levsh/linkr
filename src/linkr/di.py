@@ -1,150 +1,61 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from contextvars import ContextVar
-from typing import Any, Generic, TypeVar
-
-from .models import Request
+from typing import Annotated, Any, Generic, TypeVar
 
 T = TypeVar("T")
-
-_current_request: ContextVar[Request | None] = ContextVar("linkr_current_request", default=None)
-_request_instances: ContextVar[dict[type, Any] | None] = ContextVar("linkr_request_instances", default=None)
-
-
-def get_current_request() -> Request:
-    """
-    Get the current RPC request being dispatched in this async context.
-
-    Raises:
-        RuntimeError: If called outside of an active RPC request dispatch.
-    """
-    req = _current_request.get()
-    if req is None:
-        raise RuntimeError("No active RPC request in current context")
-    return req
 
 
 class Depends(Generic[T]):
     """
-    Marker for dependency injection in handler parameters.
+    Dependency injection marker with optional inline factory.
 
-    Use ``Depends[T]`` as a type hint on handler parameters to signal
-    that the value should be resolved from the :class:`DiContainer`
-    rather than from the RPC arguments.
+    Use ``Depends[Type, factory]`` as a type hint on handler parameters.
+    The factory is called to produce the dependency instance.
 
-    Example::
+    Examples::
 
-        def get_user(user_id: int, db: Depends[Database]) -> dict:
-            ...
+        # Transient - new instance each call
+        def handler(db: Depends[Database, lambda: Database("postgres://...")]) -> None: ...
+
+        # Singleton - factory with internal cache
+        def make_singleton() -> Callable[..., Database]:
+            instance = None
+            def factory():
+                nonlocal instance
+                if instance is None:
+                    instance = Database("postgres://...")
+                return instance
+            return factory
+        def handler(db: Depends[Database, make_singleton()]) -> None: ...
+
+        # Class factory (callable object)
+        class DatabaseFactory:
+            def __init__(self, url: str):
+                self.url = url
+                self._instance = None
+            def __call__(self) -> Database:
+                if self._instance is None:
+                    self._instance = Database(self.url)
+                return self._instance
+        def handler(db: Depends[Database, DatabaseFactory("postgres://...")]) -> None: ...
     """
 
-
-class DiContainer:
-    """
-    Registry of dependency types.
-
-    Stores factories for singleton and transient dependencies.
-    Singleton factories are called once and the result is cached.
-    Transient factories produce a new instance on every resolution.
-
-    Example::
-
-        container = DiContainer()
-        container.add_singleton(Database, lambda: Database("postgres://..."))
-        container.add_transient(RequestContext, create_ctx)
-    """
-
-    def __init__(self) -> None:
+    def __init__(self, factory: Callable[[], T] | None = None) -> None:
         """
-        Initialize empty container.
-
-        Attributes:
-            _singletons: Cached singleton instances.
-            _singleton_factories: Factories for singletons not yet resolved.
-            _transients: Factories for transient dependencies.
-        """
-        self._singletons: dict[type, Any] = {}
-        self._singleton_factories: dict[type, Callable[[], Any]] = {}
-        self._scoped_factories: dict[type, Callable[[], Any]] = {}
-        self._transients: dict[type, Callable[[], Any]] = {}
-
-    def add_singleton(self, type_: type, factory: Callable[[], Any]) -> None:
-        """
-        Register a singleton dependency.
-
-        The factory is called once on first resolve and the result is
-        cached for all future resolutions.
-
-        Calling this method again for the same *type_* replaces the
-        factory and invalidates any previously cached instance.
-
         Args:
-            type_: The dependency type used in Depends[T].
-            factory: A zero-argument callable that produces the instance.
+            factory: Optional callable that produces the dependency instance.
+                When None, the dependency must be resolved another way
+                (e.g. via an external container).
         """
-        self._singletons.pop(type_, None)
-        self._singleton_factories[type_] = factory
+        self.factory = factory
 
-    def add_scoped(self, type_: type, factory: Callable[[], Any]) -> None:
-        """
-        Register a request-scoped dependency.
+    def __class_getitem__(cls, item: type | tuple[type, Callable[[], Any] | None]) -> Annotated[Any, Any]:
+        if isinstance(item, tuple):
+            type_ = item[0]
+            factory = item[1] if len(item) > 1 else None
+            return Annotated[type_, cls(factory)]
+        return Annotated[item, cls(None)]
 
-        The factory is called once per request and the instance is cached
-        for the duration of that request.
-
-        Args:
-            type_: The dependency type used in Depends[T].
-            factory: A zero-argument callable that produces the instance.
-        """
-        self._scoped_factories[type_] = factory
-
-    def add_transient(self, type_: type, factory: Callable[[], Any]) -> None:
-        """
-        Register a transient dependency.
-
-        A new instance is created by calling the factory every time the
-        dependency is resolved.
-
-        Args:
-            type_: The dependency type used in Depends[T].
-            factory: A zero-argument callable that produces the instance.
-        """
-        self._transients[type_] = factory
-
-    def resolve(self, type_: type) -> Any:
-        """
-        Resolve a dependency by type.
-
-        Args:
-            type_: The type to resolve.
-
-        Returns:
-            The resolved dependency instance.
-
-        Raises:
-            KeyError: If no dependency is registered for *type_*.
-        """
-        if type_ in self._singletons:
-            return self._singletons[type_]
-
-        if type_ in self._singleton_factories:
-            instance = self._singleton_factories[type_]()
-            self._singletons[type_] = instance
-            del self._singleton_factories[type_]
-            return instance
-
-        if type_ in self._scoped_factories:
-            instances = _request_instances.get()
-            if instances is None:
-                raise RuntimeError(f"Cannot resolve scoped dependency {type_} outside of an active request context")
-            if type_ in instances:
-                return instances[type_]
-            instance = self._scoped_factories[type_]()
-            instances[type_] = instance
-            return instance
-
-        factory = self._transients.get(type_)
-        if factory is None:
-            raise KeyError(f"no dependency registered for {type_}")
-        return factory()
+    def __repr__(self) -> str:
+        return f"Depends[factory={self.factory is not None}]"

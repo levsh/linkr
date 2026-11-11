@@ -1,11 +1,11 @@
 [project]
 name = "linkr"
-version = "0.4.0"
-description = "Async RPC framework with middleware support"
+version = "0.5.0"
+description = "Async messaging framework with RPC, task and event delivery modes"
 readme = "README.md"
 requires-python = ">=3.11,<4"
 license = "MIT"
-keywords = ["rpc", "async", "framework", "rabbitmq", "amqp", "middleware"]
+keywords = ["rpc", "task", "event", "pubsub", "async", "framework", "rabbitmq", "amqp", "middleware"]
 authors = [
     { name = "Roman Koshel", email = "roma.koshel@gmail.com" },
 ]
@@ -24,7 +24,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-rabbitmq = ["rmqaio>=0.18.0"]
+rabbitmq = ["aio-pika>=9.0"]
+docs = ["zensical"]
 
 [project.urls]
 Homepage = "https://github.com/levsh/linkr"
@@ -42,6 +43,12 @@ pytest = "*"
 pytest-asyncio = "*"
 pytest-cov = "*"
 ruff = "*"
+
+[tool.poetry.group.docs]
+optional = true
+
+[tool.poetry.group.docs.dependencies]
+zensical = "*"
 
 [build-system]
 requires = ["poetry-core"]
@@ -77,7 +84,9 @@ warn_redundant_casts = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["src"]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 markers = [
     "integration: tests that require external services like Docker",
 ]
@@ -86,11 +95,14 @@ markers = [
 disable = [
     "missing-module-docstring",
     "missing-class-docstring",
+    "missing-function-docstring",
     "broad-exception-caught",
     "too-few-public-methods",
     "too-many-instance-attributes",
     "too-many-arguments",
+    "too-many-lines",
     "too-many-locals",
+    "too-many-public-methods",
     "too-many-return-statements",
     "too-many-branches",
     "unused-argument",

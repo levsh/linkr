@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import gzip
 
-from linkr import App, LocalTransport
+from linkr import App, LocalBackend
 from linkr.middleware.gzip import GzipMiddleware
-from linkr.models import RawMessage, Request, Response
+from linkr.models import Message, Request, Response
+
+
+def make_request() -> Request:
+    return Request(type="rpc", data={"method": "test", "args": (), "kwds": {}})
 
 
 class TestGzipMiddleware:
@@ -15,11 +19,11 @@ class TestGzipMiddleware:
 
     async def test_small_request_not_compressed(self):
         mw = GzipMiddleware()
-        raw = RawMessage(data=self.SMALL, headers={})
-        request = Request(method="test", args=(), kwds={})
+        raw = Message(data=self.SMALL, headers={})
+        request = make_request()
 
-        async def call_next() -> RawMessage | None:
-            return RawMessage(data=b"ok", headers={})
+        async def call_next() -> Message | None:
+            return Message(data=b"ok", headers={})
 
         await mw.dispatch_client(call_next, raw, request)
         assert raw.data == self.SMALL
@@ -27,11 +31,11 @@ class TestGzipMiddleware:
 
     async def test_large_request_compressed(self):
         mw = GzipMiddleware()
-        raw = RawMessage(data=self.LARGE, headers={})
-        request = Request(method="test", args=(), kwds={})
+        raw = Message(data=self.LARGE, headers={})
+        request = make_request()
 
-        async def call_next() -> RawMessage | None:
-            return RawMessage(data=b"ok", headers={})
+        async def call_next() -> Message | None:
+            return Message(data=b"ok", headers={})
 
         await mw.dispatch_client(call_next, raw, request)
         assert raw.data != self.LARGE
@@ -40,12 +44,12 @@ class TestGzipMiddleware:
 
     async def test_client_decompresses_response(self):
         mw = GzipMiddleware()
-        raw = RawMessage(data=b"tiny", headers={})
-        request = Request(method="test", args=(), kwds={})
+        raw = Message(data=b"tiny", headers={})
+        request = make_request()
         compressed = gzip.compress(self.LARGE)
 
-        async def call_next() -> RawMessage | None:
-            return RawMessage(data=compressed, headers={"content_encoding": "gzip"})
+        async def call_next() -> Message | None:
+            return Message(data=compressed, headers={"content_encoding": "gzip"})
 
         result = await mw.dispatch_client(call_next, raw, request)
         assert result is not None
@@ -54,12 +58,11 @@ class TestGzipMiddleware:
     async def test_server_decompresses_request(self):
         mw = GzipMiddleware()
         compressed = gzip.compress(self.LARGE)
-        raw = RawMessage(data=compressed, headers={"content_encoding": "gzip"})
-        req = Request(method="test", args=(), kwds={})
-        response = Response(id=req.id, type="result", data={"result": "ok"})
+        raw = Message(data=compressed, headers={"content_encoding": "gzip"})
+        response = Response(id=make_request().id, type="result", data={"result": "ok"})
 
-        async def call_next() -> tuple[RawMessage, Response] | tuple[None, None]:
-            return RawMessage(data=b"ok", headers={}), response
+        async def call_next() -> tuple[Message, Response] | tuple[None, None]:
+            return Message(data=b"ok", headers={}), response
 
         await mw.dispatch_server(call_next, raw)
         assert raw.data == self.LARGE
@@ -67,13 +70,12 @@ class TestGzipMiddleware:
 
     async def test_server_compresses_large_response(self):
         mw = GzipMiddleware()
-        raw = RawMessage(data=b"small", headers={})
+        raw = Message(data=b"small", headers={})
         large_data = b"y" * 2000
-        req = Request(method="test", args=(), kwds={})
-        response = Response(id=req.id, type="result", data={"result": "large"})
+        response = Response(id=make_request().id, type="result", data={"result": "large"})
 
-        async def call_next() -> tuple[RawMessage, Response] | tuple[None, None]:
-            return RawMessage(data=large_data, headers={}), response
+        async def call_next() -> tuple[Message, Response] | tuple[None, None]:
+            return Message(data=large_data, headers={}), response
 
         raw_resp, resp = await mw.dispatch_server(call_next, raw)
         assert raw_resp is not None
@@ -83,9 +85,9 @@ class TestGzipMiddleware:
 
     async def test_server_handles_none_response(self):
         mw = GzipMiddleware()
-        raw = RawMessage(data=b"small", headers={})
+        raw = Message(data=b"small", headers={})
 
-        async def call_next() -> tuple[RawMessage, Response] | tuple[None, None]:
+        async def call_next() -> tuple[Message, Response] | tuple[None, None]:
             return None, None
 
         result = await mw.dispatch_server(call_next, raw)
@@ -93,11 +95,11 @@ class TestGzipMiddleware:
 
     async def test_custom_min_size(self):
         mw = GzipMiddleware(min_size=1)
-        raw = RawMessage(data=b"x", headers={})
-        request = Request(method="test", args=(), kwds={})
+        raw = Message(data=b"x", headers={})
+        request = make_request()
 
-        async def call_next() -> RawMessage | None:
-            return RawMessage(data=b"ok", headers={})
+        async def call_next() -> Message | None:
+            return Message(data=b"ok", headers={})
 
         await mw.dispatch_client(call_next, raw, request)
         assert raw.data != b"x"
@@ -105,11 +107,11 @@ class TestGzipMiddleware:
 
     async def test_existing_content_encoding_merged(self):
         mw = GzipMiddleware()
-        raw = RawMessage(data=self.LARGE, headers={"content_encoding": "custom"})
-        request = Request(method="test", args=(), kwds={})
+        raw = Message(data=self.LARGE, headers={"content_encoding": "custom"})
+        request = make_request()
 
-        async def call_next() -> RawMessage | None:
-            return RawMessage(data=b"ok", headers={})
+        async def call_next() -> Message | None:
+            return Message(data=b"ok", headers={})
 
         await mw.dispatch_client(call_next, raw, request)
         ce = raw.headers.get("content_encoding", "")
@@ -119,12 +121,11 @@ class TestGzipMiddleware:
     async def test_existing_content_encoding_merged_on_server(self):
         mw = GzipMiddleware()
         large_data = b"z" * 2000
-        raw = RawMessage(data=b"small", headers={})
-        req = Request(method="test", args=(), kwds={})
-        response = Response(id=req.id, type="result", data={"result": "large"})
+        raw = Message(data=b"small", headers={})
+        response = Response(id=make_request().id, type="result", data={"result": "large"})
 
-        async def call_next() -> tuple[RawMessage, Response] | tuple[None, None]:
-            return RawMessage(data=large_data, headers={"content_encoding": "custom"}), response
+        async def call_next() -> tuple[Message, Response] | tuple[None, None]:
+            return Message(data=large_data, headers={"content_encoding": "custom"}), response
 
         raw_resp, _ = await mw.dispatch_server(call_next, raw)
         assert raw_resp is not None
@@ -137,8 +138,7 @@ class TestGzipMiddlewareWithApp:
     """Integration tests for GzipMiddleware through the full App pipeline."""
 
     async def test_gzip_roundtrip_small_payload(self):
-        transport = LocalTransport()
-        app = App(transport=transport)
+        app = App("app", backend=LocalBackend())
         app.add_middleware(GzipMiddleware())
         await app.init()
 
@@ -147,13 +147,11 @@ class TestGzipMiddlewareWithApp:
             return "pong"
 
         await app.consume()
-        result = await app.make("ping").invoke()
-        assert result == "pong"
+        assert await app.call("app.ping", (), {}) == "pong"
         await app.close()
 
     async def test_gzip_large_request(self):
-        transport = LocalTransport()
-        app = App(transport=transport)
+        app = App("app", backend=LocalBackend())
         app.add_middleware(GzipMiddleware())
         await app.init()
 
@@ -163,13 +161,11 @@ class TestGzipMiddlewareWithApp:
 
         large = "x" * 2000
         await app.consume()
-        result = await app.make("echo", data=large).invoke()
-        assert result == large
+        assert await app.call("app.echo", (), {"data": large}) == large
         await app.close()
 
     async def test_gzip_large_response(self):
-        transport = LocalTransport()
-        app = App(transport=transport)
+        app = App("app", backend=LocalBackend())
         app.add_middleware(GzipMiddleware())
         await app.init()
 
@@ -178,13 +174,11 @@ class TestGzipMiddlewareWithApp:
             return "y" * 2000
 
         await app.consume()
-        result = await app.make("get_large").invoke()
-        assert result == "y" * 2000
+        assert await app.call("app.get_large", (), {}) == "y" * 2000
         await app.close()
 
     async def test_gzip_add_middleware_appends(self):
-        transport = LocalTransport()
-        app = App(transport=transport)
+        app = App("app", backend=LocalBackend())
         assert len(app._wire_mw) == 0
         app.add_middleware(GzipMiddleware())
         assert len(app._wire_mw) == 1

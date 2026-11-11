@@ -5,31 +5,9 @@ import sys
 from os import path
 
 import pytest
-import rmqaio
-from docker.errors import DockerException
 
-from linkr import App, LocalTransport
+from linkr import App, LocalBackend
 from tests import utils
-
-
-@pytest.fixture
-async def transport():
-    LocalTransport.reset()
-    t = LocalTransport()
-    await t.init()
-    yield t
-    await t.close()
-    LocalTransport.reset()
-
-
-@pytest.fixture
-async def app(transport: LocalTransport):
-    a = App(transport=transport)
-    await a.init()
-    await a.consume()
-    yield a
-    await a.close()
-
 
 CWD = path.dirname(path.abspath(__file__))
 
@@ -41,38 +19,73 @@ log_hndl.setFormatter(log_frmt)
 logger.addHandler(log_hndl)
 logger.setLevel(logging.DEBUG)
 
-rmqaio.logger.addHandler(log_hndl)
-rmqaio.logger.setLevel(logging.DEBUG)
-
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "integration: marks tests that require external services like Docker")
 
 
+@pytest.fixture(autouse=True)
+def reset_local_backend():
+    LocalBackend.reset()
+    yield
+    LocalBackend.reset()
+
+
+@pytest.fixture
+async def local_backend():
+    backend = LocalBackend()
+    await backend.init()
+    yield backend
+    await backend.close()
+
+
+@pytest.fixture
+async def app(local_backend: LocalBackend):
+    instance = App("app", backend=local_backend)
+    await instance.init()
+    yield instance
+    await instance.close()
+
+
 @pytest.fixture(scope="class")
 def container_executor():
+    pytest.importorskip("docker")
+
     try:
         yield utils.ContainerExecutor()
-    except DockerException:
-        pytest.skip("Docker daemon is not available")
+    except Exception as exc:  # pragma: no cover - depends on environment
+        pytest.skip(f"Docker daemon is not available: {exc}")
 
 
-@pytest.fixture(scope="function")
-def rabbitmq(container_executor):
+@pytest.fixture(scope="class")
+def rabbitmq(container_executor, request):
+    ports = {
+        "5672": "5672",
+        "15672": "15672",
+    }
+    environment = {
+        "RABBITMQ_DEFAULT_USER": "guest",
+        "RABBITMQ_DEFAULT_PASS": "guest",
+    }
+    volumes = {}
+    if getattr(request, "param", {}).get("tls") is True:
+        ports.update(
+            {
+                "5671": "5671",
+                "15671": "15671",
+            },
+        )
     with container_executor.run_wait_up(
         "rabbitmq:3-management",
-        ports={"5672": "5672", "15672": "15672"},
+        name="rabbitmq",
+        ports=ports,
+        environment=environment,
+        volumes=volumes,
         healthcheck={
-            "test": ["CMD", "rabbitmq-diagnostics", "-q", "ping"],
-            "interval": 2_000_000_000,  # 2s
+            "test": ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"],
+            "interval": 1_000_000_000,  # 1s
             "timeout": 1_000_000_000,  # 1s
             "retries": 30,
         },
-        environment={
-            "RABBITMQ_DEFAULT_USER": "guest",
-            "RABBITMQ_DEFAULT_PASS": "guest",
-        },
     ) as container:
-        ip = utils.get_ip(container)
-        port = 5672
-        yield {"container": container, "ip": ip, "port": port}
+        yield container

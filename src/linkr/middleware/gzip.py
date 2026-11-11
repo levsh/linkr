@@ -4,7 +4,7 @@ import gzip
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from ..models import RawMessage, Request, Response
+from ..models import Message, Request, Response
 from . import WireMiddleware
 
 
@@ -32,55 +32,55 @@ class GzipMiddleware(WireMiddleware):
 
     async def dispatch_client(
         self,
-        call_next: Callable[[], Awaitable[RawMessage | None]],
-        request_raw_message: RawMessage,
+        call_next: Callable[[], Awaitable[Message | None]],
+        request_message: Message,
         request: Request,
         *,
         kwds: dict[str, Any] | None = None,
-    ) -> RawMessage | None:
+    ) -> Message | None:
         """
         Compress outgoing request, decompress incoming response.
 
-        Mutates *request_raw_message* in place before calling the next layer,
-        and mutates the returned response :class:`RawMessage` in place
+        Mutates *request_message* in place before calling the next layer,
+        and mutates the returned response :class:`Message` in place
         before returning.
         """
-        if len(request_raw_message.data) >= self._min_size:
-            request_raw_message.data = gzip.compress(request_raw_message.data)
-            _merge_ce(request_raw_message.headers, "gzip")
+        if len(request_message.data) >= self._min_size:
+            request_message.data = gzip.compress(request_message.data)
+            _merge_ce(request_message.headers, "gzip")
 
-        raw_response = await call_next()
+        response_message = await call_next()
 
-        if raw_response is not None and "gzip" in raw_response.headers.get("content_encoding", ""):
-            raw_response.data = gzip.decompress(raw_response.data)
+        if response_message is not None and "gzip" in response_message.headers.get("content_encoding", ""):
+            response_message.data = gzip.decompress(response_message.data)
 
-        return raw_response
+        return response_message
 
     async def dispatch_server(
         self,
-        call_next: Callable[[], Awaitable[tuple[RawMessage, Response] | tuple[None, None]]],
-        request_raw_message: RawMessage,
+        call_next: Callable[[], Awaitable[tuple[Message, Response] | tuple[None, None]]],
+        request_message: Message,
         *,
         kwds: dict[str, Any] | None = None,
-    ) -> tuple[RawMessage, Response] | tuple[None, None]:
+    ) -> tuple[Message, Response] | tuple[None, None]:
         """
         Decompress incoming request, compress outgoing response.
 
-        Mutates *request_raw_message* in place before calling the next layer,
-        and mutates the returned response :class:`RawMessage` in place
+        Mutates *request_message* in place before calling the next layer,
+        and mutates the returned response :class:`Message` in place
         before returning.
         """
-        if "gzip" in request_raw_message.headers.get("content_encoding", ""):
-            request_raw_message.data = gzip.decompress(request_raw_message.data)
+        if "gzip" in request_message.headers.get("content_encoding", ""):
+            request_message.data = gzip.decompress(request_message.data)
 
         result = await call_next()
 
         if result is None or result[0] is None:
             return None, None
 
-        raw_response, response = result
-        if len(raw_response.data) >= self._min_size:
-            raw_response.data = gzip.compress(raw_response.data)
-            _merge_ce(raw_response.headers, "gzip")
+        response_message, response = result
+        if len(response_message.data) >= self._min_size:
+            response_message.data = gzip.compress(response_message.data)
+            _merge_ce(response_message.headers, "gzip")
 
-        return raw_response, response
+        return response_message, response

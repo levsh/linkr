@@ -4,7 +4,7 @@ from abc import ABC
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from ..models import RawMessage, Request, Response
+from ..models import Message, Request, Response
 
 
 class BaseMiddleware(ABC):
@@ -47,23 +47,23 @@ class AppMiddleware(BaseMiddleware):
         call_next: Callable[[], Awaitable[Response | None]],
         request: Request,
         *,
-        kwds: dict[str, Any] | None = None,
+        kwds: dict[str, Any],
     ) -> Response | None:
         """
-        Wrap a client-side RPC call.
+        Wrap a client-side call.
 
         Override this method to perform actions before and/or after
-        the rest of the client pipeline (serialize → wire-level
-        dispatch_client → transport → deserialize). Call
+        the rest of the client pipeline (serialize -> wire-level
+        dispatch_client -> backend -> deserialize). Call
         ``await call_next()`` to invoke the next layer.
 
         Args:
             call_next: The next layer in the middleware chain.
-            request: The outgoing RPC request.
+            request: The outgoing request.
             kwds: Additional call context forwarded from the caller.
 
         Returns:
-            The RPC response, or ``None`` for fire-and-forget.
+            The response, or ``None`` for fire-and-forget.
         """
         return await call_next()
 
@@ -71,8 +71,7 @@ class AppMiddleware(BaseMiddleware):
         self,
         call_next: Callable[[], Awaitable[Response | None]],
         request: Request,
-        *,
-        kwds: dict[str, Any] | None = None,
+        request_message: Message,
     ) -> Response | None:
         """
         Wrap a server-side request handler.
@@ -83,10 +82,11 @@ class AppMiddleware(BaseMiddleware):
 
         Args:
             call_next: The next layer in the middleware chain.
-            request: The incoming RPC request.
-            kwds: Additional call context forwarded from the caller.
+            request: The incoming request.
+            request_message: The serialised incoming request (mutate in place).
+
         Returns:
-            The RPC response, or ``None`` if no response is sent.
+            The response, or ``None`` if no response is sent.
         """
         return await call_next()
 
@@ -101,7 +101,7 @@ class WireMiddleware(BaseMiddleware):
 
     Subclasses should override :meth:`dispatch_client` and/or
     :meth:`dispatch_server` to transform data using the onion pattern.
-    Mutate ``request_raw_message.data`` / ``request_raw_message.headers``
+    Mutate ``request_message.data`` / ``request_message.headers``
     in place before calling ``call_next()`` to affect the outgoing data.
     The response (if any) can be similarly mutated after ``call_next()``
     returns.
@@ -109,55 +109,51 @@ class WireMiddleware(BaseMiddleware):
 
     async def dispatch_client(
         self,
-        call_next: Callable[[], Awaitable[RawMessage | None]],
-        request_raw_message: RawMessage,
+        call_next: Callable[[], Awaitable[Message | None]],
+        request_message: Message,
         request: Request,
         *,
-        kwds: dict[str, Any] | None = None,
-    ) -> RawMessage | None:
+        kwds: dict[str, Any],
+    ) -> Message | None:
         """
-        Wrap a client-side RPC call (request → transport → response).
+        Wrap a client-side call (request -> backend -> response).
 
         Override this method to transform the outgoing request bytes
-        (by mutating *request_raw_message*) before ``await call_next()``,
+        (by mutating *request_message*) before ``await call_next()``,
         and/or transform the incoming response bytes (by mutating the
-        returned :class:`RawMessage`) after ``await call_next()``.
+        returned :class:`Message`) after ``await call_next()``.
 
         Args:
             call_next: The next layer in the wire middleware chain.
-            request_raw_message: The serialised request (mutate in place).
-            request: The original RPC request object.
+            request_message: The serialised request (mutate in place).
+            request: The original request object.
             kwds: Additional call context forwarded from the caller.
 
         Returns:
-            The (possibly modified) response :class:`RawMessage`,
+            The (possibly modified) response :class:`Message`,
             or ``None`` for fire-and-forget.
         """
         return await call_next()
 
     async def dispatch_server(
         self,
-        call_next: Callable[[], Awaitable[tuple[RawMessage, Response] | tuple[None, None]]],
-        request_raw_message: RawMessage,
-        *,
-        kwds: dict[str, Any] | None = None,
-    ) -> tuple[RawMessage, Response] | tuple[None, None]:
+        call_next: Callable[[], Awaitable[tuple[Message, Response] | tuple[None, None]]],
+        request_message: Message,
+    ) -> tuple[Message, Response] | tuple[None, None]:
         """
-        Wrap a server-side request handler (request → dispatch → response).
+        Wrap a server-side request handler (request -> dispatch -> response).
 
         Override this method to transform the incoming request bytes
-        (by mutating *request_raw_message*) before ``await call_next()``,
+        (by mutating *request_message*) before ``await call_next()``,
         and/or transform the outgoing response bytes (by mutating the
-        returned :class:`RawMessage`) after ``await call_next()``.
+        returned :class:`Message`) after ``await call_next()``.
 
         Args:
             call_next: The next layer in the wire middleware chain.
-            request_raw_message: The serialised incoming request
-                (mutate in place).
-            kwds: Additional call context forwarded from the caller.
+            request_message: The serialised incoming request (mutate in place).
 
         Returns:
-            A ``(raw_response, response)`` tuple where *raw_response* is
+            A ``(response_message, response)`` tuple where *response_message* is
             the serialised response bytes and *response* is the
             deserialised :class:`Response`.
         """

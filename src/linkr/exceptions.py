@@ -4,13 +4,17 @@ from typing import Any
 
 
 class ErrorCode:
+    """
+    Machine-readable RPC error codes.
+    """
+
     INTERNAL_ERROR = "InternalError"
     METHOD_NOT_FOUND = "MethodNotFound"
     TIMEOUT = "Timeout"
     VALIDATION_ERROR = "ValidationError"
 
 
-class RpcError(Exception):
+class RPCError(Exception):
     """
     Structured RPC error returned by the server.
 

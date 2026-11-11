@@ -1,0 +1,55 @@
+[project]
+site_name = "linkr"
+site_description = "Async messaging framework with RPC, task and event delivery modes"
+docs_dir = "docs"
+site_dir = "site"
+
+nav = [
+  { "Home" = "index.md" },
+  { "Getting started" = [
+    "getting-started/installation.md",
+    "getting-started/quickstart.md",
+  ] },
+  { "Concepts" = [
+    "concepts/overview.md",
+    "concepts/delivery-modes.md",
+    "concepts/routing-and-naming.md",
+    "concepts/request-response.md",
+  ] },
+  { "Guides" = [
+    "guides/rpc.md",
+    "guides/tasks.md",
+    "guides/events.md",
+    "guides/client-api.md",
+    "guides/lifecycle.md",
+    "guides/serialization.md",
+    "guides/middleware.md",
+    "guides/hooks.md",
+    "guides/dependency-injection.md",
+    "guides/error-handling.md",
+  ] },
+  { "Backends" = [
+    "backends/overview.md",
+    "backends/local.md",
+    "backends/rabbitmq.md",
+  ] },
+  { "Reference" = [
+    "reference/api.md",
+    "reference/configuration.md",
+    "reference/hooks-events.md",
+  ] },
+]
+
+[project.theme]
+features = [
+  "navigation.sections",
+  "navigation.expand",
+  "navigation.path",
+  "navigation.top",
+  "content.code.copy",
+]
+
+[[project.theme.palette]]
+scheme = "slate"
+primary = "indigo"
+accent = "amber"

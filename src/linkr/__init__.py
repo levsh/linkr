@@ -1,35 +1,67 @@
 import importlib.metadata
 
-from linkr.app import App, HandlerInfo, Invocation
-from linkr.di import Depends, DiContainer, get_current_request
-from linkr.exceptions import ErrorCode, RpcError
+from linkr.app import App, Router, get_current_request
+from linkr.backends import Backend, Mode
+from linkr.backends.local import LocalBackend
+from linkr.di import Depends
+from linkr.exceptions import ErrorCode, RPCError
+from linkr.hooks import (
+    AfterHandlerEvent,
+    AppHooks,
+    BeforeHandlerEvent,
+    ConsumeStartEvent,
+    ConsumeStopEvent,
+    HandlerErrorEvent,
+    HookPoint,
+    HookRegistry,
+    MessageDroppedEvent,
+    RequestPublishedEvent,
+    RequestReceivedEvent,
+    ResponseReceivedEvent,
+)
 from linkr.middleware import AppMiddleware, BaseMiddleware, WireMiddleware
-from linkr.models import ErrorInfo, Request, Response
+from linkr.models import ErrorInfo, HandlerInfo, Message, QueueOptions, Request, RequestType, Response, ResponseType
 from linkr.serializer import JsonRpcSerializer, JsonSerializer, Serializer
-from linkr.transports import Transport
-from linkr.transports.local import LocalTransport
 
 __all__ = [
     "Depends",
-    "DiContainer",
     "get_current_request",
-    "Invocation",
     "HandlerInfo",
     "App",
+    "Router",
     "ErrorCode",
     "ErrorInfo",
-    "RpcError",
+    "RPCError",
+    "AfterHandlerEvent",
+    "AppHooks",
+    "BeforeHandlerEvent",
+    "ConsumeStartEvent",
+    "ConsumeStopEvent",
+    "HandlerErrorEvent",
+    "HookPoint",
+    "HookRegistry",
+    "MessageDroppedEvent",
+    "RequestPublishedEvent",
+    "RequestReceivedEvent",
+    "ResponseReceivedEvent",
     "AppMiddleware",
     "BaseMiddleware",
     "WireMiddleware",
+    "Mode",
+    "QueueOptions",
+    "Message",
     "Request",
     "Response",
+    "RequestType",
+    "ResponseType",
     "JsonRpcSerializer",
     "JsonSerializer",
     "Serializer",
-    "Transport",
-    "LocalTransport",
+    "Backend",
+    "LocalBackend",
 ]
 
-
-__version__ = importlib.metadata.version("linkr")
+try:
+    __version__ = importlib.metadata.version("linkr")
+except importlib.metadata.PackageNotFoundError:
+    __version__ = "0.5.0"

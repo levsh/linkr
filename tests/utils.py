@@ -1,8 +1,6 @@
 import platform
 import time
-from contextlib import contextmanager
-
-import docker
+from contextlib import contextmanager, suppress
 
 
 def get_ip(container, internal: bool = False):
@@ -18,6 +16,8 @@ def get_ip(container, internal: bool = False):
 
 class ContainerExecutor:
     def __init__(self):
+        import docker
+
         self.client = docker.from_env()
         self.kwds = {"detach": True}
 
@@ -40,14 +40,10 @@ class ContainerExecutor:
             print(self.dump_logs(container))
             raise
         finally:
-            try:
+            with suppress(Exception):
                 container.stop(timeout=10)
-            except Exception:
-                pass
-            try:
+            with suppress(Exception):
                 container.remove(force=True, v=True)
-            except Exception:
-                pass
 
     @contextmanager
     def run(self, image, **kwds):
@@ -86,10 +82,9 @@ class ContainerExecutor:
     def run_wait_exit(self, image, **kwds):
         with self.run(image, **kwds) as container:
             try:
+                container.wait()
                 yield container
             except Exception:
                 print("=== CONTAINER LOGS ===")
                 print(self.dump_logs(container))
                 raise
-            finally:
-                container.wait()

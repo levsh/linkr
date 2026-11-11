@@ -5,17 +5,17 @@ from abc import ABC, abstractmethod
 from typing import Any, ClassVar
 from uuid import UUID, uuid4
 
-from .models import ErrorInfo, RawMessage, Request, Response
+from .models import ErrorInfo, Message, Request, Response
 
 
 class Serializer(ABC):
     """
-    Abstract serializer for RPC messages.
+    Abstract serializer.
 
-    Implementations convert :class:`Request` and :class:`Response`
-    objects to and from :class:`RawMessage` for transmission over the wire.
+    Implementations convert :class:`Message` and :class:`Response`
+    objects to and from :class:`Message` for transmission over the wire.
     Wire-level metadata (e.g. content type, encoding) is carried in
-    ``RawMessage.headers``.
+    ``Message.headers``.
     """
 
     @property
@@ -24,99 +24,56 @@ class Serializer(ABC):
         """Human-readable format name (e.g. ``"linkr1.0"``, ``"jsonrpc2.0"``)."""
 
     @abstractmethod
-    def dumps_request(self, request: Request) -> RawMessage:
-        """
-        Serialize an RPC request.
-
-        Args:
-            request: The request to serialize.
-
-        Returns:
-            A :class:`RawMessage` with the encoded payload and wire-level
-            metadata in its ``headers`` dict.
-        """
+    def dumps_request(self, request: Request) -> Message:
+        """Serialize a :class:`Request` into a message."""
 
     @abstractmethod
-    def loads_request(self, raw: RawMessage) -> Request:
-        """
-        Deserialize a :class:`RawMessage` into an RPC request.
-
-        Args:
-            raw: The raw message to deserialize.
-
-        Returns:
-            The deserialized Request.
-        """
+    def loads_request(self, message: Message) -> Request:
+        """Deserialize a :class:`Message` into a request."""
 
     @abstractmethod
-    def dumps_response(self, response: Response) -> RawMessage:
-        """
-        Serialize an RPC response.
-
-        Args:
-            response: The response to serialize.
-
-        Returns:
-            A :class:`RawMessage`.
-        """
+    def dumps_response(self, response: Response) -> Message:
+        """Serialize a :class:`Response` into a raw message."""
 
     @abstractmethod
-    def loads_response(self, raw: RawMessage) -> Response:
-        """
-        Deserialize a :class:`RawMessage` into an RPC response.
-
-        Args:
-            raw: The raw message to deserialize.
-
-        Returns:
-            The deserialized Response.
-        """
+    def loads_response(self, message: Message) -> Response:
+        """Deserialize a :class:`Message` into a response."""
 
 
 class JsonSerializer(Serializer):
-    """
-    JSON serializer for RPC messages.
-
-    Uses Pydantic's ``model_dump_json()`` and ``model_validate_json()``
-    under the hood. Sets ``content_type: application/json`` and
-    ``serializer: linkr1.0`` on every serialized message.
-    """
+    """JSON serializer for linkr messages."""
 
     @property
     def name(self) -> str:
+        """Human-readable format name (``"linkr1.0"``)."""
         return "linkr1.0"
 
-    def dumps_request(self, request: Request) -> RawMessage:
+    def dumps_request(self, request: Request) -> Message:
+        """Serialize a :class:`Request` into a message."""
         data = request.model_dump_json().encode()
         headers = {"content_type": "application/json", "serializer": self.name}
-        return RawMessage(data=data, headers=headers)
+        return Message(data=data, headers=headers)
 
-    def loads_request(self, raw: RawMessage) -> Request:
-        return Request.model_validate_json(raw.data)
+    def loads_request(self, message: Message) -> Request:
+        """Deserialize a :class:`Message` into a request."""
+        return Request.model_validate_json(message.data)
 
-    def dumps_response(self, response: Response) -> RawMessage:
+    def dumps_response(self, response: Response) -> Message:
+        """Serialize a :class:`Response` into a raw message."""
         data = response.model_dump_json().encode()
         headers = {"content_type": "application/json", "serializer": self.name}
-        return RawMessage(data=data, headers=headers)
+        return Message(data=data, headers=headers)
 
-    def loads_response(self, raw: RawMessage) -> Response:
-        return Response.model_validate_json(raw.data)
+    def loads_response(self, message: Message) -> Response:
+        """Deserialize a :class:`Message` into a response."""
+        return Response.model_validate_json(message.data)
 
 
 class JsonRpcSerializer(Serializer):
     """
-    JSON-RPC 2.0 serializer for RPC messages.
+    JSON-RPC 2.0 serializer.
 
-    Serializes to and from the JSON-RPC 2.0 specification.  On output
-    ``RawMessage.headers`` always carries ``serializer: jsonrpc2.0`` so that
-    a receiver can pick the correct deserializer without guessing.
-
-    On input (``loads_*``) the format is **strict**: only payloads with
-    ``"jsonrpc": "2.0"`` are accepted.  Use the auto-detection logic in
-    :class:`App` when multiple serializers are configured.
-
-    To extend the set of known error codes, subclass and override
-    ``ERROR_CODE_MAP``::
+    To extend the set of known error codes, subclass and override ``ERROR_CODE_MAP``::
 
         class MyJsonRpcSerializer(JsonRpcSerializer):
             ERROR_CODE_MAP = {
@@ -136,28 +93,39 @@ class JsonRpcSerializer(Serializer):
     def name(self) -> str:
         return "jsonrpc2.0"
 
-    def dumps_request(self, request: Request) -> RawMessage:
+    def dumps_request(self, request: Request) -> Message:
+        """Serialize an RPC :class:`Request` into a JSON-RPC 2.0 message."""
+        if request.type != "rpc":
+            raise ValueError("JsonRpcSerializer supports only RPC requests")
+
+        data = request.data
+
         obj: dict[str, Any] = {
             "jsonrpc": "2.0",
-            "method": request.method,
+            "method": data["method"],
             "id": str(request.id),
         }
 
-        if request.args and request.kwds:
-            obj["params"] = {"args": list(request.args), "kwds": request.kwds}
-        elif request.args:
-            obj["params"] = list(request.args)
-        elif request.kwds:
-            obj["params"] = dict(request.kwds)
+        args = data["args"]
+        kwds = data["kwds"]
+
+        if args and kwds:
+            obj["params"] = {"args": list(args), "kwds": kwds}
+        elif args:
+            obj["params"] = list(args)
+        elif kwds:
+            obj["params"] = dict(kwds)
 
         if request.headers:
             obj["headers"] = dict(request.headers)
 
-        data = json.dumps(obj, separators=(",", ":")).encode()
-        return RawMessage(data=data, headers={"content_type": "application/json", "serializer": self.name})
+        payload = json.dumps(obj, separators=(",", ":")).encode()
+        return Message(data=payload, headers={"content_type": "application/json", "serializer": self.name})
 
-    def loads_request(self, raw: RawMessage) -> Request:
-        obj: dict[str, Any] = json.loads(raw.data)
+    def loads_request(self, message: Message) -> Request:
+        """Deserialize a :class:`Message` into a JSON-RPC 2.0 request."""
+        obj: dict[str, Any] = json.loads(message.data)
+
         if not isinstance(obj, dict) or obj.get("jsonrpc") != "2.0":
             raise ValueError("not a JSON-RPC 2.0 request")
 
@@ -168,7 +136,7 @@ class JsonRpcSerializer(Serializer):
 
         if isinstance(params, list):
             args = tuple(params)
-            kwds: dict[str, Any] = {}
+            kwds = {}
         elif isinstance(params, dict):
             if "args" in params and "kwds" in params:
                 args = tuple(params["args"])
@@ -181,9 +149,21 @@ class JsonRpcSerializer(Serializer):
             kwds = {}
 
         req_id = UUID(raw_id) if raw_id is not None else uuid4()
-        return Request(id=req_id, method=method, args=args, kwds=kwds, headers=headers)
+        return Request.model_validate(
+            {
+                "id": req_id,
+                "type": "rpc",
+                "data": {
+                    "method": method,
+                    "args": args,
+                    "kwds": kwds,
+                },
+                "headers": headers,
+            }
+        )
 
-    def dumps_response(self, response: Response) -> RawMessage:
+    def dumps_response(self, response: Response) -> Message:
+        """Serialize a :class:`Response` into a JSON-RPC 2.0 message."""
         obj: dict[str, Any] = {
             "jsonrpc": "2.0",
             "id": str(response.id),
@@ -215,10 +195,12 @@ class JsonRpcSerializer(Serializer):
             obj["headers"] = dict(response.headers)
 
         data = json.dumps(obj, separators=(",", ":")).encode()
-        return RawMessage(data=data, headers={"content_type": "application/json", "serializer": self.name})
+        return Message(data=data, headers={"content_type": "application/json", "serializer": self.name})
 
-    def loads_response(self, raw: RawMessage) -> Response:
-        obj: dict[str, Any] = json.loads(raw.data)
+    def loads_response(self, message: Message) -> Response:
+        """Deserialize a :class:`Message` into a JSON-RPC 2.0 response."""
+        obj: dict[str, Any] = json.loads(message.data)
+
         if not isinstance(obj, dict) or obj.get("jsonrpc") != "2.0":
             raise ValueError("not a JSON-RPC 2.0 response")
 
