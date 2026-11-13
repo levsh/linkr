@@ -5,7 +5,8 @@ from typing import Any
 
 class ErrorCode:
     """
-    Machine-readable RPC error codes.
+    Machine-readable error codes used in RPC error payloads and structured
+    exceptions.
     """
 
     INTERNAL_ERROR = "InternalError"
@@ -14,12 +15,21 @@ class ErrorCode:
     VALIDATION_ERROR = "ValidationError"
 
 
-class RPCError(Exception):
+class LinkrError(Exception):
     """
-    Structured RPC error returned by the server.
+    Base class for all exceptions raised by linkr.
 
-    Raised by :meth:`App.call` when the server response contains an
-    error payload.
+    Includes RPC errors, request/serialization errors, and other
+    framework-level failures.
+    """
+
+
+class RPCError(LinkrError):
+    """
+    Error resulting from an RPC call.
+
+    Raised by :meth:`App.call` when the server response contains an error
+    payload or when the call times out waiting for a response.
 
     Attributes:
         error_code: Machine-readable error code (e.g. ``"MethodNotFound"``).
@@ -43,3 +53,34 @@ class RPCError(Exception):
         self.error_message = error_message
         self.error_details = error_details
         super().__init__(f"[{error_code}] {error_message}")
+
+
+class RequestError(LinkrError):
+    """
+    Local or transport-level error when preparing/sending a request.
+
+    Raised for failures that are not tied to an RPC response, such as
+    resolving an unknown serializer, serializing a request, or detecting a
+    serializer for an incoming message on the server.
+
+    Available for all delivery modes (RPC, task, event) when the error
+    happens before the response is received.
+
+    Attributes:
+        error_message: Human-readable error description.
+        error_details: Optional structured error metadata.
+    """
+
+    def __init__(
+        self,
+        error_message: str = "",
+        error_details: dict[str, Any] | None = None,
+    ) -> None:
+        """
+        Args:
+            error_message: Human-readable error description.
+            error_details: Optional dict with additional error context.
+        """
+        self.error_message = error_message
+        self.error_details = error_details
+        super().__init__(error_message)

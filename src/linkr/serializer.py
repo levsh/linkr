@@ -12,8 +12,8 @@ class Serializer(ABC):
     """
     Abstract serializer.
 
-    Implementations convert :class:`Message` and :class:`Response`
-    objects to and from :class:`Message` for transmission over the wire.
+    Implementations convert :class:`Request` and :class:`Response` objects to
+    and from wire :class:`Message` for transmission over the wire.
     Wire-level metadata (e.g. content type, encoding) is carried in
     ``Message.headers``.
     """
@@ -43,6 +43,12 @@ class Serializer(ABC):
 class JsonSerializer(Serializer):
     """JSON serializer for linkr messages."""
 
+    __slots__ = ("_headers",)
+
+    def __init__(self) -> None:
+        """Create a JSON serializer for linkr 1.0 messages."""
+        self._headers = {"content_type": "application/json", "serializer": "linkr1.0"}
+
     @property
     def name(self) -> str:
         """Human-readable format name (``"linkr1.0"``)."""
@@ -51,8 +57,7 @@ class JsonSerializer(Serializer):
     def dumps_request(self, request: Request) -> Message:
         """Serialize a :class:`Request` into a message."""
         data = request.model_dump_json().encode()
-        headers = {"content_type": "application/json", "serializer": self.name}
-        return Message(data=data, headers=headers)
+        return Message(data=data, headers=self._headers)
 
     def loads_request(self, message: Message) -> Request:
         """Deserialize a :class:`Message` into a request."""
@@ -61,8 +66,7 @@ class JsonSerializer(Serializer):
     def dumps_response(self, response: Response) -> Message:
         """Serialize a :class:`Response` into a raw message."""
         data = response.model_dump_json().encode()
-        headers = {"content_type": "application/json", "serializer": self.name}
-        return Message(data=data, headers=headers)
+        return Message(data=data, headers=self._headers)
 
     def loads_response(self, message: Message) -> Response:
         """Deserialize a :class:`Message` into a response."""
@@ -89,8 +93,15 @@ class JsonRpcSerializer(Serializer):
         "ValidationError": -32602,
     }
 
+    __slots__ = ("_headers",)
+
+    def __init__(self) -> None:
+        """Create a JSON-RPC 2.0 serializer."""
+        self._headers = {"content_type": "application/json", "serializer": "jsonrpc2.0"}
+
     @property
     def name(self) -> str:
+        """Human-readable format name (``"jsonrpc2.0"``)."""
         return "jsonrpc2.0"
 
     def dumps_request(self, request: Request) -> Message:
@@ -120,7 +131,7 @@ class JsonRpcSerializer(Serializer):
             obj["headers"] = dict(request.headers)
 
         payload = json.dumps(obj, separators=(",", ":")).encode()
-        return Message(data=payload, headers={"content_type": "application/json", "serializer": self.name})
+        return Message(data=payload, headers=self._headers)
 
     def loads_request(self, message: Message) -> Request:
         """Deserialize a :class:`Message` into a JSON-RPC 2.0 request."""
@@ -195,7 +206,7 @@ class JsonRpcSerializer(Serializer):
             obj["headers"] = dict(response.headers)
 
         data = json.dumps(obj, separators=(",", ":")).encode()
-        return Message(data=data, headers={"content_type": "application/json", "serializer": self.name})
+        return Message(data=data, headers=self._headers)
 
     def loads_response(self, message: Message) -> Response:
         """Deserialize a :class:`Message` into a JSON-RPC 2.0 response."""

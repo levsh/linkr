@@ -33,10 +33,10 @@ class GzipMiddleware(WireMiddleware):
     async def dispatch_client(
         self,
         call_next: Callable[[], Awaitable[Message | None]],
-        request_message: Message,
         request: Request,
+        request_message: Message,
         *,
-        kwds: dict[str, Any] | None = None,
+        context: dict[str, Any] | None = None,
     ) -> Message | None:
         """
         Compress outgoing request, decompress incoming response.
@@ -60,8 +60,6 @@ class GzipMiddleware(WireMiddleware):
         self,
         call_next: Callable[[], Awaitable[tuple[Message, Response] | tuple[None, None]]],
         request_message: Message,
-        *,
-        kwds: dict[str, Any] | None = None,
     ) -> tuple[Message, Response] | tuple[None, None]:
         """
         Decompress incoming request, compress outgoing response.

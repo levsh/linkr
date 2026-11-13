@@ -47,7 +47,7 @@ class AppMiddleware(BaseMiddleware):
         call_next: Callable[[], Awaitable[Response | None]],
         request: Request,
         *,
-        kwds: dict[str, Any],
+        context: dict[str, Any],
     ) -> Response | None:
         """
         Wrap a client-side call.
@@ -60,7 +60,7 @@ class AppMiddleware(BaseMiddleware):
         Args:
             call_next: The next layer in the middleware chain.
             request: The outgoing request.
-            kwds: Additional call context forwarded from the caller.
+            context: Additional call context forwarded from the caller.
 
         Returns:
             The response, or ``None`` for fire-and-forget.
@@ -71,7 +71,6 @@ class AppMiddleware(BaseMiddleware):
         self,
         call_next: Callable[[], Awaitable[Response | None]],
         request: Request,
-        request_message: Message,
     ) -> Response | None:
         """
         Wrap a server-side request handler.
@@ -82,8 +81,7 @@ class AppMiddleware(BaseMiddleware):
 
         Args:
             call_next: The next layer in the middleware chain.
-            request: The incoming request.
-            request_message: The serialised incoming request (mutate in place).
+            request: The deserialised incoming request.
 
         Returns:
             The response, or ``None`` if no response is sent.
@@ -110,10 +108,10 @@ class WireMiddleware(BaseMiddleware):
     async def dispatch_client(
         self,
         call_next: Callable[[], Awaitable[Message | None]],
-        request_message: Message,
         request: Request,
+        request_message: Message,
         *,
-        kwds: dict[str, Any],
+        context: dict[str, Any],
     ) -> Message | None:
         """
         Wrap a client-side call (request -> backend -> response).
@@ -125,9 +123,9 @@ class WireMiddleware(BaseMiddleware):
 
         Args:
             call_next: The next layer in the wire middleware chain.
-            request_message: The serialised request (mutate in place).
             request: The original request object.
-            kwds: Additional call context forwarded from the caller.
+            request_message: The serialised request (mutate in place).
+            context: Additional call context forwarded from the caller.
 
         Returns:
             The (possibly modified) response :class:`Message`,

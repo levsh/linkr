@@ -62,8 +62,6 @@ class Backend(ABC):
         queue: str,
         topics: list[str],
         handler: Handler,
-        *,
-        options: Sequence[QueueOptions] | None = None,
     ) -> None:
         """
         Register an event consumer.
@@ -72,7 +70,6 @@ class Backend(ABC):
             queue: Physical queue owned by this consumer instance.
             topics: Topic patterns this queue is bound to.
             handler: Async callable receiving a raw event message.
-            options: Optional backend-specific queue/consumer options.
         """
 
     @abstractmethod
@@ -124,7 +121,7 @@ class Backend(ABC):
         queue: str,
         message: Message,
         *,
-        kwds: dict[str, Any] | None = None,
+        context: dict[str, Any] | None = None,
     ) -> asyncio.Future[Message]:
         """
         Send an RPC request and return a Future for the response.
@@ -140,7 +137,7 @@ class Backend(ABC):
         queue: str,
         message: Message,
         *,
-        kwds: dict[str, Any] | None = None,
+        context: dict[str, Any] | None = None,
     ) -> None:
         """Send a task to *queue*. No response is expected."""
 
@@ -150,6 +147,6 @@ class Backend(ABC):
         topic: str,
         message: Message,
         *,
-        kwds: dict[str, Any] | None = None,
+        context: dict[str, Any] | None = None,
     ) -> None:
         """Publish an event to *topic*. No response is expected."""

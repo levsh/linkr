@@ -86,8 +86,6 @@ class LocalBackend(Backend):
         queue: str,
         topics: list[str],
         handler: Handler,
-        *,
-        options: Any = None,
     ) -> None:
         """
         Register an event consumer.
@@ -96,7 +94,6 @@ class LocalBackend(Backend):
             queue: Physical queue owned by this consumer instance.
             topics: Topic patterns this queue is bound to.
             handler: Async callable receiving a raw event message.
-            options: Optional backend-specific queue/consumer options (ignored).
         """
         self._event_consumers[queue] = _EventConsumer(
             backend=self,
@@ -138,7 +135,7 @@ class LocalBackend(Backend):
         queue: str,
         message: Message,
         *,
-        kwds: dict[str, Any] | None = None,
+        context: dict[str, Any] | None = None,
     ) -> asyncio.Future[Message]:
         """Send an RPC request and return a Future for the response."""
         handler = self._pick("rpc", queue, self._rpc_consumers.get(queue))
@@ -171,7 +168,7 @@ class LocalBackend(Backend):
         queue: str,
         message: Message,
         *,
-        kwds: dict[str, Any] | None = None,
+        context: dict[str, Any] | None = None,
     ) -> None:
         """Deliver a task to exactly one consumer."""
         handler = self._pick("task", queue, self._task_consumers.get(queue))
@@ -189,7 +186,7 @@ class LocalBackend(Backend):
         topic: str,
         message: Message,
         *,
-        kwds: dict[str, Any] | None = None,
+        context: dict[str, Any] | None = None,
     ) -> None:
         """Deliver an event to every matching consumer."""
         consumers = [consumer for consumer in list(self._event_consumers.values()) if consumer.matches(topic)]

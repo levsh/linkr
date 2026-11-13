@@ -10,7 +10,7 @@ It provides a single application model (`App`) for registering handlers, sending
     - RPC: one consumer handles a call and returns a result.
     - Task: one consumer handles a job, no result (fire-and-forget).
     - Event: every matching subscriber receives the event (fan-out).
-- **Backend abstraction**: in-process `LocalBackend` for development/testing and `RmqBackend` for RabbitMQ.
+- **Backend abstraction**: in-process `LocalBackend` (no external broker) and `RmqBackend` for RabbitMQ.
 - **Middleware**: app-level (`Request`/`Response`) and wire-level (raw bytes/headers) with onion-style dispatch.
 - **Hooks**: observer events for consume lifecycle, client publish/response, server receive/dispatch, handler execution, and dropped messages.
 - **Serialization**: `JsonSerializer` (`linkr1.0`) by default, `JsonRpcSerializer` (`jsonrpc2.0`, RPC-only), server-side auto-detection when multiple serializers are configured.

@@ -1,10 +1,10 @@
 import importlib.metadata
 
-from linkr.app import App, Router, get_current_request
+from linkr.app import App, RPCRouter, TaskRouter, get_current_request
 from linkr.backends import Backend, Mode
 from linkr.backends.local import LocalBackend
 from linkr.di import Depends
-from linkr.exceptions import ErrorCode, RPCError
+from linkr.exceptions import ErrorCode, LinkrError, RequestError, RPCError
 from linkr.hooks import (
     AfterHandlerEvent,
     AppHooks,
@@ -28,10 +28,13 @@ __all__ = [
     "get_current_request",
     "HandlerInfo",
     "App",
-    "Router",
+    "RPCRouter",
+    "TaskRouter",
     "ErrorCode",
     "ErrorInfo",
     "RPCError",
+    "LinkrError",
+    "RequestError",
     "AfterHandlerEvent",
     "AppHooks",
     "BeforeHandlerEvent",

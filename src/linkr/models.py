@@ -68,6 +68,9 @@ class HandlerInfo:
     options: dict[str, Any] = field(default_factory=dict)
     dep_types: dict[str, tuple[type, Callable[[], Any] | None]] = field(default_factory=dict)
     queue: str | None = None
+    validate_args: bool = False
+    validation_adapters: dict[str, Any] = field(default_factory=dict)
+    validation_param_names: tuple[str, ...] = ()
 
 
 class QueueOptions:

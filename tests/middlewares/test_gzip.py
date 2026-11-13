@@ -25,7 +25,7 @@ class TestGzipMiddleware:
         async def call_next() -> Message | None:
             return Message(data=b"ok", headers={})
 
-        await mw.dispatch_client(call_next, raw, request)
+        await mw.dispatch_client(call_next, request, raw)
         assert raw.data == self.SMALL
         assert "gzip" not in raw.headers.get("content_encoding", "")
 
@@ -37,7 +37,7 @@ class TestGzipMiddleware:
         async def call_next() -> Message | None:
             return Message(data=b"ok", headers={})
 
-        await mw.dispatch_client(call_next, raw, request)
+        await mw.dispatch_client(call_next, request, raw)
         assert raw.data != self.LARGE
         assert gzip.decompress(raw.data) == self.LARGE
         assert raw.headers.get("content_encoding") == "gzip"
@@ -51,7 +51,7 @@ class TestGzipMiddleware:
         async def call_next() -> Message | None:
             return Message(data=compressed, headers={"content_encoding": "gzip"})
 
-        result = await mw.dispatch_client(call_next, raw, request)
+        result = await mw.dispatch_client(call_next, request, raw)
         assert result is not None
         assert result.data == self.LARGE
 
@@ -101,7 +101,7 @@ class TestGzipMiddleware:
         async def call_next() -> Message | None:
             return Message(data=b"ok", headers={})
 
-        await mw.dispatch_client(call_next, raw, request)
+        await mw.dispatch_client(call_next, request, raw)
         assert raw.data != b"x"
         assert raw.headers.get("content_encoding") == "gzip"
 
@@ -113,7 +113,7 @@ class TestGzipMiddleware:
         async def call_next() -> Message | None:
             return Message(data=b"ok", headers={})
 
-        await mw.dispatch_client(call_next, raw, request)
+        await mw.dispatch_client(call_next, request, raw)
         ce = raw.headers.get("content_encoding", "")
         assert "custom" in ce
         assert "gzip" in ce

@@ -21,18 +21,20 @@ app.add_middleware(MyAppMiddleware())
 Subclass `AppMiddleware` to work with `Request`/`Response` objects.
 
 ```python
+from collections.abc import Awaitable, Callable
 from typing import Any
+
 from linkr import AppMiddleware
-from linkr.models import Message, Request, Response
+from linkr.models import Request, Response
 
 
 class LoggingMiddleware(AppMiddleware):
     async def dispatch_client(
         self,
-        call_next,
+        call_next: Callable[[], Awaitable[Response | None]],
         request: Request,
         *,
-        kwds: dict[str, Any],
+        context: dict[str, Any],
     ) -> Response | None:
         # before send
         response = await call_next()
@@ -41,9 +43,8 @@ class LoggingMiddleware(AppMiddleware):
 
     async def dispatch_server(
         self,
-        call_next,
+        call_next: Callable[[], Awaitable[Response | None]],
         request: Request,
-        request_message: Message,
     ) -> Response | None:
         # before dispatch
         response = await call_next()
@@ -51,16 +52,18 @@ class LoggingMiddleware(AppMiddleware):
         return response
 ```
 
-- `dispatch_client`: wraps the client pipeline around backend call; `kwds` receives call context.
-- `dispatch_server`: wraps server-side dispatch for the request.
-- For task/event flows there is no response returned to a remote caller.
+- `dispatch_client`: wraps the client pipeline around backend call; `context` receives call context.
+  - `dispatch_server`: wraps server-side dispatch for the request (only `Request` is available at this layer).
+  - For task/event flows there is no response returned to a remote caller.
 
 ## Wire-level middleware
 
 Subclass `WireMiddleware` to transform serialized `Message.data`/`Message.headers` (e.g. compression, encryption).
 
 ```python
+from collections.abc import Awaitable, Callable
 from typing import Any
+
 from linkr import WireMiddleware
 from linkr.models import Message, Request, Response
 
@@ -68,11 +71,11 @@ from linkr.models import Message, Request, Response
 class CustomWireMiddleware(WireMiddleware):
     async def dispatch_client(
         self,
-        call_next,
-        request_message: Message,
+        call_next: Callable[[], Awaitable[Message | None]],
         request: Request,
+        request_message: Message,
         *,
-        kwds: dict[str, Any],
+        context: dict[str, Any],
     ) -> Message | None:
         # mutate request_message before send
         response_message = await call_next()
@@ -81,7 +84,7 @@ class CustomWireMiddleware(WireMiddleware):
 
     async def dispatch_server(
         self,
-        call_next,
+        call_next: Callable[[], Awaitable[tuple[Message, Response] | tuple[None, None]]],
         request_message: Message,
     ) -> tuple[Message, Response] | tuple[None, None]:
         # mutate incoming request_message

@@ -29,6 +29,7 @@ test:
 	$(RUN) pytest -v
 
 docs:
+	PYTHONPATH=src $(RUN) python scripts/generate_contract_docs.py
 	$(RUN) zensical build
 
 docs-serve:

@@ -11,12 +11,6 @@
 pip install linkr
 ```
 
-With Poetry:
-
-```bash
-poetry add linkr
-```
-
 ## Optional dependencies
 
 ### RabbitMQ backend
@@ -25,10 +19,6 @@ poetry add linkr
 
 ```bash
 pip install "linkr[rabbitmq]"
-```
-
-```bash
-poetry add "linkr[rabbitmq]"
 ```
 
 This installs `aio-pika>=9.0`.
@@ -41,25 +31,5 @@ import linkr
 print(linkr.__version__)
 ```
 
-## Development setup (from source)
-
-```bash
-poetry install --with test
-```
-
-If you use the docs extras/group defined in this repository:
-
-```bash
-poetry install --with docs
-```
-
-Run quality checks:
-
-```bash
-make lint
-make typecheck
-make test
-```
-
 !!! tip
-    For local development and tests without external services, start with [`LocalBackend`](../backends/local.md). Use [`RmqBackend`](../backends/rabbitmq.md) when you need broker-backed delivery.
+    To run without external services, start with [`LocalBackend`](../backends/local.md). Use [`RmqBackend`](../backends/rabbitmq.md) when you need broker-backed delivery.

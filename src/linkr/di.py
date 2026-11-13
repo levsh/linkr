@@ -51,6 +51,16 @@ class Depends(Generic[T]):
         self.factory = factory
 
     def __class_getitem__(cls, item: type | tuple[type, Callable[[], Any] | None]) -> Annotated[Any, Any]:
+        """
+        Construct a ``Depends`` annotation.
+
+        Args:
+            item: A type, or a ``(type, factory)`` tuple. When only a type is
+                provided, the dependency has no inline factory.
+
+        Returns:
+            An ``Annotated`` type with a ``Depends`` marker.
+        """
         if isinstance(item, tuple):
             type_ = item[0]
             factory = item[1] if len(item) > 1 else None

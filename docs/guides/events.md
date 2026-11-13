@@ -19,7 +19,7 @@ def on_any_user_event(user_id: int | None = None, **event: object) -> None:
 ```
 
 - `@app.subscribe(topic_pattern, **options)` registers a subscriber.
-- Each app instance receives events on its own event queue (`<app>.events.<instance_id>`), so multiple instances can all receive the same event.
+- Each app instance receives events on its own event queue (`<app>.<instance_id>`), so multiple instances can all receive the same event.
 - Multiple subscribers in the same app for the same topic are all invoked.
 - `options` can include `validate_types=True|False`.
 
@@ -60,10 +60,12 @@ Patterns are matched against the full topic.
 
 ```python
 @app.subscribe("order.#")
-def on_order(topic_data: dict | None = None, **event): ...
+def on_order(topic_data: dict[str, object] | None = None, **event: object) -> None:
+    ...
 
 @app.subscribe("audit.*.created")
-def on_created(**event): ...
+def on_created(**event: object) -> None:
+    ...
 ```
 
 ## Delivery and errors
@@ -91,15 +93,18 @@ billing_a = App("billing", backend=backend)
 billing_b = App("billing", backend=backend)
 producer = App("producer", backend=backend)
 
-seen_a, seen_b = [], []
+seen_a: list[int] = []
+seen_b: list[int] = []
 
 @billing_a.subscribe("user.created")
-def a(user_id: int): seen_a.append(user_id)
+def a(user_id: int) -> None:
+    seen_a.append(user_id)
 
 @billing_b.subscribe("user.created")
-def b(user_id: int): seen_b.append(user_id)
+def b(user_id: int) -> None:
+    seen_b.append(user_id)
 
-async def main():
+async def main() -> None:
     async with billing_a, billing_b, producer:
         await billing_a.consume()
         await billing_b.consume()

@@ -1,6 +1,6 @@
 # Local backend
 
-`LocalBackend` is an in-process backend intended for development and tests. It routes messages directly between `App` instances in the same process.
+`LocalBackend` is an in-process backend that requires no external broker. It runs handlers within the current process and is useful for trying `linkr` locally.
 
 ```python
 from linkr import App, LocalBackend
@@ -9,39 +9,48 @@ backend = LocalBackend()
 app = App("orders", backend=backend)
 ```
 
-## Delivery semantics
+## Characteristics
 
-- **RPC (`consume_rpc` / `request`)**: competing consumers per queue. A request is delivered to one consumer selected for the queue; the call returns the handler's response. If no RPC consumer is registered, `request` fails.
-- **Task (`consume_task` / `send`)**: competing consumers per queue. Each task is delivered to exactly one consumer. If no task consumer is registered, the task is not handled (a warning is logged).
-- **Event (`consume_event` / `emit`)**: fan-out. Events are delivered to event consumers whose topic patterns match the emitted topic.
+- **Transport:** in-process async delivery (no network, no persistence).
+- **RPC:** competing consumers on a queue (round-robin); `backend.request(...)` schedules handler execution and returns a `Future` completed with the handler response.
+- **Tasks:** competing consumers on a queue (round-robin). If no task consumer is registered, the task is dropped with a warning.
+- **Events:** fan-out to every registered event consumer whose topic pattern matches. Events are dispatched concurrently and each subscriber receives a copy of the message.
+- **State:** consumer registries are class-level (process-wide). Use `LocalBackend.reset()` in tests to clear state.
+- **Queue options:** `consume_rpc` / `consume_task` accept backend-specific queue options for API compatibility but ignore them (in-process transport has no broker queue/QoS settings). Event consumers are not configured via app-level options.
 
-## Lifecycle and stop behavior
-
-- `init()` / `close()` manage this backend instance's consumers.
-- `consume_rpc(queue, handler, *, options=None)` / `consume_task(queue, handler, *, options=None)` / `consume_event(queue, topics, handler, *, options=None)` accept backend-specific queue options for API compatibility but ignore them (in-process transport has no broker queue/QoS settings).
-- `stop_consume_rpc(queue=None)` / `stop_consume_tasks(queue=None)` stop consumers for all queues of the mode or a specific queue.
-- `stop_consume_events(queue=None, topic=None)`:
-  - `queue=None` — stop all event consumers for this instance
-  - `queue` set, `topic=None` — stop the specified event queue consumer
-  - `queue` and `topic` set — remove only that topic subscription/pattern from the queue
-
-`App` is responsible for deciding when to call these (e.g. only stopping a queue when no handlers remain).
-
-## Testing notes
-
-- **Process-wide state:** consumer registries and round-robin state are shared at the class/process level. Tests that use `LocalBackend` directly should ensure isolation when needed.
-- **`reset()`:** `LocalBackend.reset()` clears all local routing/consumer state (useful in test fixtures):
+## Key API
 
 ```python
-from linkr import LocalBackend
-
-LocalBackend.reset()
+LocalBackend(name: str | None = None)
 ```
 
-- **Behavior differs from brokers:** in-process execution does not model network partitions, broker persistence, redelivery, or cross-process routing. Validate production semantics with your target backend (e.g. `RmqBackend`).
+- `consume_rpc(queue, handler, *, options=None)` / `consume_task(queue, handler, *, options=None)` register competing consumers. `options` is ignored.
+- `consume_event(queue, topics, handler)` registers an event consumer for topic patterns on a queue.
+- `stop_consume_rpc(queue=None)`, `stop_consume_tasks(queue=None)`, `stop_consume_events(queue=None, topic=None)` stop/unregister consumers owned by the backend instance.
+- `request(queue, message, *, context=None) -> asyncio.Future[Message]` returns after publish/registration.
+  - `send(queue, message, *, context=None)` delivers to one task consumer (or warns if none).
+  - `emit(topic, message, *, context=None)` delivers to all matching subscribers.
+- `LocalBackend.reset()` clears process-wide consumer registries and round-robin state.
 
-## When to use
+## Usage
 
-- Unit/integration tests of application logic
-- Local development without external infrastructure
-- Examples and quickstarts
+```python
+from linkr import App, LocalBackend
+
+async def main() -> None:
+    backend = LocalBackend()
+    app = App("demo", backend=backend)
+
+    @app.method("ping")
+    def ping() -> str:
+        return "pong"
+
+    async with app:
+        await app.consume()
+        assert await app.call("demo.ping", (), {}) == "pong"
+```
+
+## Notes
+
+- Call `LocalBackend.reset()` when you need to clear process-wide consumer registries and round-robin state between runs.
+- Behavior such as delivery without consumers and error propagation is local/in-process and differs from broker backends; validate critical semantics against the target production backend.

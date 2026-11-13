@@ -100,11 +100,12 @@ disable = [
     "too-few-public-methods",
     "too-many-instance-attributes",
     "too-many-arguments",
+    "too-many-branches",
     "too-many-lines",
     "too-many-locals",
     "too-many-public-methods",
     "too-many-return-statements",
-    "too-many-branches",
+    "too-many-statements",
     "unused-argument",
 ]
 

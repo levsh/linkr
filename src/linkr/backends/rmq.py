@@ -6,7 +6,7 @@ import ssl
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 import aio_pika
@@ -29,7 +29,19 @@ logger = logging.getLogger("linkr")
 
 @dataclass(frozen=True)
 class RmqQueueOptions(QueueOptions):
-    """RabbitMQ-specific queue/consumer options."""
+    """
+    RabbitMQ-specific queue/consumer options.
+
+    Attributes:
+        durable: Queue durability. ``None`` uses the backend/mode default.
+        exclusive: Queue exclusivity. ``None`` uses the backend/mode default.
+        auto_delete: Auto-delete queue when no consumers. ``None`` uses the
+            backend/mode default.
+        passive: Declare queue passively (do not create). ``None`` omits.
+        arguments: Additional queue declaration arguments (e.g. ``x-max-length``).
+        prefetch_count: Consumer prefetch count. ``None`` omits (unlimited).
+        extra: Reserved for future backend-specific options.
+    """
 
     durable: bool | None = None
     exclusive: bool | None = None
@@ -44,14 +56,14 @@ class RmqBackend(Backend):
     """
     RabbitMQ backend for linkr using aio-pika.
 
-    Declares three named exchanges:
+    Exchange topology is configured via the ``exchange`` parameter:
+    * **Single exchange (default):** ``exchange="linkr"`` (str) — one TOPIC exchange
+      shared by RPC, tasks, and events.
+    * **Per-mode exchanges:** ``exchange={"rpc": "...", "task": "...", "event": "..."}``
+      — separate exchanges for each mode (all three keys required). RPC and tasks use
+      DIRECT type; events use TOPIC type.
 
-    * ``linkr.rpc`` (direct) — RPC requests
-    * ``linkr.tasks`` (direct) — task distribution
-    * ``linkr.events`` (topic) — event fan-out with ``*`` and ``#`` wildcards
-
-    RPC responses are delivered through an exclusive, auto-delete callback
-    queue matched by ``correlation_id``.
+    RPC responses are delivered through an exclusive callback queue matched by ``correlation_id``.
     """
 
     def __init__(
@@ -65,16 +77,37 @@ class RmqBackend(Backend):
         ssl_context: ssl.SSLContext | None = None,
         auth_mechanism: str = "PLAIN",
         connection_name: str | None = None,
-        rpc_exchange: str = "linkr.rpc",
-        task_exchange: str = "linkr.tasks",
-        event_exchange: str = "linkr.events",
-        exchange_durable: bool = True,
-        queue_durable: bool = True,
-        prefetch_count: int = 10,
+        exchange: str | dict[Mode, str] = "linkr",
+        exchange_durable: bool | dict[Mode, bool] = True,
+        queue_options: RmqQueueOptions | dict[Literal["rpc", "task"], RmqQueueOptions] | None = None,
         heartbeat: int = 30,
         blocked_connection_timeout: int = 30,
         results_queue_prefix: str | None = None,
     ) -> None:
+        """
+        Create a RabbitMQ backend.
+
+        Args:
+            host: RabbitMQ host.
+            port: RabbitMQ port.
+            login: Login used for AMQP authentication.
+            password: Password used for AMQP authentication.
+            virtualhost: AMQP virtual host.
+            ssl_context: Optional ``ssl.SSLContext`` for a TLS connection.
+            auth_mechanism: SASL authentication mechanism (default ``"PLAIN"``).
+            connection_name: Optional name exposed to the broker.
+            exchange: Exchange name(s). A single ``str`` creates one shared
+                TOPIC exchange for all modes; a ``dict[Mode, str]`` creates
+                separate exchanges per mode (all keys required).
+            exchange_durable: Whether the exchange(s) are durable. ``bool`` or
+                ``dict[Mode, bool]`` (same shape as *exchange*).
+            queue_options: Optional ``RmqQueueOptions`` (applied to both rpc
+                and task queues) or a ``dict[Literal["rpc","task"], RmqQueueOptions]``.
+            heartbeat: Heartbeat interval in seconds.
+            blocked_connection_timeout: Timeout in seconds for blocked connections.
+            results_queue_prefix: Prefix for the exclusive reply queue used by
+                RPC calls. Defaults to ``"linkr.res."``.
+        """
         self._host = host
         self._port = port
         self._login = login
@@ -83,12 +116,6 @@ class RmqBackend(Backend):
         self._ssl_context = ssl_context
         self._auth_mechanism = auth_mechanism
         self._connection_name = connection_name
-        self._rpc_exchange_name = rpc_exchange
-        self._task_exchange_name = task_exchange
-        self._event_exchange_name = event_exchange
-        self._exchange_durable = exchange_durable
-        self._queue_durable = queue_durable
-        self._prefetch_count = prefetch_count
         self._heartbeat = heartbeat
         self._blocked_connection_timeout = blocked_connection_timeout
 
@@ -97,19 +124,80 @@ class RmqBackend(Backend):
 
         self._connection: AbstractRobustConnection | None = None
         self._channel: AbstractChannel | None = None
-        self._rpc_exchange: AbstractExchange | None = None
-        self._task_exchange: AbstractExchange | None = None
-        self._event_exchange: AbstractExchange | None = None
+        self._exchanges: dict[Mode, AbstractExchange] = {}
         self._callback_queue: AbstractQueue | None = None
         self._futures: dict[str, asyncio.Future[LinkrMessage]] = {}
         self._consumers: dict[str, dict[str, tuple[AbstractChannel, AbstractQueue, str]]] = {}
         self._closing = False
+
+        # Normalize exchange names and durables
+        modes: tuple[Mode, ...] = ("rpc", "task", "event")
+        if isinstance(exchange, str):
+            exchange_names = {mode: exchange for mode in modes}
+            exchange_types = {mode: ExchangeType.TOPIC for mode in modes}
+        else:
+            if not isinstance(exchange, dict):
+                raise TypeError("exchange must be str or dict[Mode, str]")
+            missing = [m for m in modes if m not in exchange]
+            if missing:
+                raise ValueError(f"exchange dict must contain all modes: {missing}")
+            extra = [k for k in exchange if k not in modes]
+            if extra:
+                raise ValueError(f"exchange dict contains invalid mode keys: {extra}")
+            exchange_names = {mode: str(exchange[mode]) for mode in modes}
+            for mode, name in exchange_names.items():
+                if not name:
+                    raise ValueError(f"exchange name for mode {mode!r} must not be empty")
+            exchange_types = {
+                "rpc": ExchangeType.DIRECT,
+                "task": ExchangeType.DIRECT,
+                "event": ExchangeType.TOPIC,
+            }
+
+        if isinstance(exchange_durable, bool):
+            exchange_durables = {mode: exchange_durable for mode in modes}
+        else:
+            if not isinstance(exchange_durable, dict):
+                raise TypeError("exchange_durable must be bool or dict[Mode, bool]")
+            missing = [m for m in modes if m not in exchange_durable]
+            if missing:
+                raise ValueError(f"exchange_durable dict must contain all modes: {missing}")
+            extra = [k for k in exchange_durable if k not in modes]
+            if extra:
+                raise ValueError(f"exchange_durable dict contains invalid mode keys: {extra}")
+            exchange_durables = {mode: bool(exchange_durable[mode]) for mode in modes}
+
+        # Normalize queue options
+        if queue_options is None:
+            queue_option_defaults: dict[str, RmqQueueOptions | None] = {"rpc": None, "task": None}
+        elif isinstance(queue_options, RmqQueueOptions):
+            queue_option_defaults = {"rpc": queue_options, "task": queue_options}
+        else:
+            if not isinstance(queue_options, dict):
+                raise TypeError("queue_options must be RmqQueueOptions, dict[rpc/task] or None")
+            missing = [m for m in ("rpc", "task") if m not in queue_options]
+            if missing:
+                raise ValueError(f"queue_options dict must contain rpc and task: {missing}")
+            extra = [k for k in queue_options if k not in ("rpc", "task")]
+            if extra:
+                raise ValueError(f"queue_options dict contains invalid mode keys: {extra}")
+            queue_option_defaults = {"rpc": queue_options["rpc"], "task": queue_options["task"]}
+            for mode, opt in queue_option_defaults.items():  # type: ignore[assignment]
+                if opt is not None and not isinstance(opt, RmqQueueOptions):
+                    raise TypeError(f"queue_options[{mode!r}] must be RmqQueueOptions or None")
+
+        self._exchange_names = exchange_names
+        self._exchange_types = exchange_types
+        self._exchange_durables = exchange_durables
+        self._queue_option_defaults = queue_option_defaults
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     async def init(self) -> None:
+        """Initialize the RabbitMQ backend: connect, declare exchanges and the reply queue."""
+
         connect_kwds: dict[str, Any] = {
             "host": self._host,
             "port": self._port,
@@ -132,32 +220,24 @@ class RmqBackend(Backend):
 
         self._connection = await aio_pika.connect_robust(**connect_kwds)
         self._channel = await self._connection.channel()
-        await self._channel.set_qos(prefetch_count=self._prefetch_count)
 
-        self._rpc_exchange = await self._channel.declare_exchange(
-            self._rpc_exchange_name,
-            type=ExchangeType.DIRECT,
-            durable=self._exchange_durable,
-        )
-        self._task_exchange = await self._channel.declare_exchange(
-            self._task_exchange_name,
-            type=ExchangeType.DIRECT,
-            durable=self._exchange_durable,
-        )
-        self._event_exchange = await self._channel.declare_exchange(
-            self._event_exchange_name,
-            type=ExchangeType.TOPIC,
-            durable=self._exchange_durable,
-        )
+        for mode in ("rpc", "task", "event"):
+            self._exchanges[mode] = await self._channel.declare_exchange(
+                self._exchange_names[mode],
+                type=self._exchange_types[mode],
+                durable=self._exchange_durables[mode],
+            )
 
         self._callback_queue = await self._channel.declare_queue(
             self._results_queue,
             exclusive=True,
-            auto_delete=True,
+            auto_delete=False,
         )
         await self._callback_queue.consume(self._on_rpc_response)
 
     async def close(self, timeout: float | None = None) -> None:
+        """Close the RabbitMQ backend: stop consumers, drop the reply queue and disconnect."""
+
         self._closing = True
         await self.stop_consume_rpc()
         await self.stop_consume_tasks()
@@ -184,13 +264,39 @@ class RmqBackend(Backend):
                 logger.exception("Failed to close connection")
             self._connection = None
 
+        self._exchanges.clear()
+
     async def stop_consume_rpc(self, queue: str | None = None) -> None:
+        """Stop RPC consumers owned by this backend instance.
+
+        Args:
+            queue: When ``None``, stop all RPC consumers. Otherwise stop the
+                consumer for the specified queue.
+        """
+
         await self._stop_consumers("rpc", queue=queue)
 
     async def stop_consume_tasks(self, queue: str | None = None) -> None:
+        """Stop task consumers owned by this backend instance.
+
+        Args:
+            queue: When ``None``, stop all task consumers. Otherwise stop the
+                consumer for the specified queue.
+        """
+
         await self._stop_consumers("task", queue=queue)
 
     async def stop_consume_events(self, queue: str | None = None, topic: str | None = None) -> None:
+        """Stop event consumers or unbind event subscriptions owned by this backend instance.
+
+        Args:
+            queue: When ``None``, stop all event consumers. Otherwise target
+                the specified event queue.
+            topic: When provided together with *queue*, remove only the
+                subscription for this topic pattern without stopping the
+                consumer. When ``None``, stop the targeted event consumer(s).
+        """
+
         if topic is not None and queue is not None:
             consumer = self._consumers.get("event", {}).get(queue)
             if consumer is None:
@@ -250,22 +356,17 @@ class RmqBackend(Backend):
         channel: AbstractChannel,
         mode: Mode,
     ) -> AbstractExchange:
-        if mode == "rpc":
-            name, ex_type = self._rpc_exchange_name, ExchangeType.DIRECT
-        elif mode == "task":
-            name, ex_type = self._task_exchange_name, ExchangeType.DIRECT
-        else:
-            name, ex_type = self._event_exchange_name, ExchangeType.TOPIC
+        if self._exchanges.get(mode) is not None and channel is self._channel:
+            return self._exchanges[mode]
         return await channel.declare_exchange(
-            name,
-            type=ex_type,
-            durable=self._exchange_durable,
+            self._exchange_names[mode],
+            type=self._exchange_types[mode],
+            durable=self._exchange_durables[mode],
         )
 
     @staticmethod
     def _queue_declare_kwargs(
         mode: Mode,
-        default_durable: bool,
         options: RmqQueueOptions | None,
     ) -> dict[str, Any]:
         if mode == "event":
@@ -273,7 +374,7 @@ class RmqBackend(Backend):
             exclusive = True
             auto_delete = False
         else:
-            durable = default_durable
+            durable = True
             exclusive = False
             auto_delete = False
 
@@ -307,9 +408,9 @@ class RmqBackend(Backend):
         correlation_id: str | None = None,
         reply_to: str | None = None,
     ) -> RobustMessage:
-        headers: dict[str, Any] = dict(message.headers or {})
+        headers = message.headers
         if correlation_id is not None:
-            headers["correlation_id"] = correlation_id
+            headers = {**headers, "correlation_id": correlation_id}
 
         ttl = headers.get("ttl")
         expiration: timedelta | None = None
@@ -330,14 +431,16 @@ class RmqBackend(Backend):
     def _to_linkr_message(incoming: AbstractIncomingMessage) -> LinkrMessage:
         return LinkrMessage(
             data=incoming.body,
-            headers=dict(incoming.headers or {}),
+            headers=incoming.headers or {},
         )
 
     # ------------------------------------------------------------------
     # Queue conversion helpers
     # ------------------------------------------------------------------
 
-    def linkr_queue_name_to_rmq_queue_name(self, queue: str, mode: Mode) -> str:
+    def queue_name_to_rmq_queue_name(self, queue: str, mode: Mode) -> str:
+        """Map a linkr queue name to the physical RabbitMQ queue name for *mode*."""
+
         if mode == "rpc":
             return f"linkr.rpc.{queue}"
         if mode == "task":
@@ -357,14 +460,16 @@ class RmqBackend(Backend):
         *,
         options: Sequence[QueueOptions] | None = None,
     ) -> None:
-        if self._rpc_exchange is None:
+        """Register an RPC consumer for *queue*."""
+
+        if self._exchanges.get("rpc") is None:
             raise RuntimeError("backend not initialized")
 
-        selected = self._select_options(options)
+        selected = self._select_options(options) or self._queue_option_defaults["rpc"]
         channel = await self._channel_for_prefetch(None if selected is None else selected.prefetch_count)
         exchange = await self._get_exchange(channel, "rpc")
-        queue_name = self.linkr_queue_name_to_rmq_queue_name(queue, "rpc")
-        declare_kwargs = self._queue_declare_kwargs("rpc", self._queue_durable, selected)
+        queue_name = self.queue_name_to_rmq_queue_name(queue, "rpc")
+        declare_kwargs = self._queue_declare_kwargs("rpc", selected)
 
         rmq_queue = await channel.declare_queue(queue_name, **declare_kwargs)
         await rmq_queue.bind(exchange, routing_key=queue)
@@ -401,9 +506,16 @@ class RmqBackend(Backend):
         queue: str,
         message: LinkrMessage,
         *,
-        kwds: dict[str, Any] | None = None,
+        context: dict[str, Any] | None = None,
     ) -> asyncio.Future[LinkrMessage]:
-        if self._channel is None or self._rpc_exchange is None or self._callback_queue is None:
+        """Send an RPC request and return a Future for the response.
+
+        The method completes once the request has been published and response
+        waiting has been registered. Await the returned Future to receive the
+        response message.
+        """
+
+        if self._channel is None or self._exchanges.get("rpc") is None or self._callback_queue is None:
             raise RuntimeError("backend not initialized")
 
         correlation_id = str(uuid4())
@@ -417,7 +529,7 @@ class RmqBackend(Backend):
                 correlation_id=correlation_id,
                 reply_to=self._callback_queue.name,
             )
-            await self._rpc_exchange.publish(robust_message, routing_key=queue)
+            await self._exchanges["rpc"].publish(robust_message, routing_key=queue)
         except Exception:
             self._futures.pop(correlation_id, None)
             if not future.done():
@@ -458,14 +570,16 @@ class RmqBackend(Backend):
         *,
         options: Sequence[QueueOptions] | None = None,
     ) -> None:
-        if self._task_exchange is None:
+        """Register a task consumer for *queue*."""
+
+        if self._exchanges.get("task") is None:
             raise RuntimeError("backend not initialized")
 
-        selected = self._select_options(options)
+        selected = self._select_options(options) or self._queue_option_defaults["task"]
         channel = await self._channel_for_prefetch(None if selected is None else selected.prefetch_count)
         exchange = await self._get_exchange(channel, "task")
-        queue_name = self.linkr_queue_name_to_rmq_queue_name(queue, "task")
-        declare_kwargs = self._queue_declare_kwargs("task", self._queue_durable, selected)
+        queue_name = self.queue_name_to_rmq_queue_name(queue, "task")
+        declare_kwargs = self._queue_declare_kwargs("task", selected)
 
         rmq_queue = await channel.declare_queue(queue_name, **declare_kwargs)
         await rmq_queue.bind(exchange, routing_key=queue)
@@ -490,13 +604,15 @@ class RmqBackend(Backend):
         queue: str,
         message: LinkrMessage,
         *,
-        kwds: dict[str, Any] | None = None,
+        context: dict[str, Any] | None = None,
     ) -> None:
-        if self._channel is None or self._task_exchange is None:
+        """Send a task to *queue*. No response is expected."""
+
+        if self._channel is None or self._exchanges.get("task") is None:
             raise RuntimeError("backend not initialized")
 
         robust_message = self._to_robust_message(message)
-        await self._task_exchange.publish(robust_message, routing_key=queue)
+        await self._exchanges["task"].publish(robust_message, routing_key=queue)
 
     # ------------------------------------------------------------------
     # Event
@@ -507,17 +623,22 @@ class RmqBackend(Backend):
         queue: str,
         topics: list[str],
         handler: Handler,
-        *,
-        options: Sequence[QueueOptions] | None = None,
     ) -> None:
-        if self._event_exchange is None:
+        """Register an event consumer.
+
+        Args:
+            queue: Physical queue owned by this consumer instance.
+            topics: Topic patterns this queue is bound to.
+            handler: Async callable receiving a raw event message.
+        """
+
+        if self._exchanges.get("event") is None:
             raise RuntimeError("backend not initialized")
 
-        selected = self._select_options(options)
-        channel = await self._channel_for_prefetch(None if selected is None else selected.prefetch_count)
+        channel = await self._channel_for_prefetch(None)
         exchange = await self._get_exchange(channel, "event")
-        queue_name = self.linkr_queue_name_to_rmq_queue_name(queue, "event")
-        declare_kwargs = self._queue_declare_kwargs("event", self._queue_durable, selected)
+        queue_name = self.queue_name_to_rmq_queue_name(queue, "event")
+        declare_kwargs = self._queue_declare_kwargs("event", None)
 
         rmq_queue = await channel.declare_queue(queue_name, **declare_kwargs)
         for topic in topics:
@@ -543,10 +664,12 @@ class RmqBackend(Backend):
         topic: str,
         message: LinkrMessage,
         *,
-        kwds: dict[str, Any] | None = None,
+        context: dict[str, Any] | None = None,
     ) -> None:
-        if self._channel is None or self._event_exchange is None:
+        """Publish an event to *topic*. No response is expected."""
+
+        if self._channel is None or self._exchanges.get("event") is None:
             raise RuntimeError("backend not initialized")
 
         robust_message = self._to_robust_message(message)
-        await self._event_exchange.publish(robust_message, routing_key=topic)
+        await self._exchanges["event"].publish(robust_message, routing_key=topic)

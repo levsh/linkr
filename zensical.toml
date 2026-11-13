@@ -35,6 +35,7 @@ nav = [
   ] },
   { "Reference" = [
     "reference/api.md",
+    "reference/contract-demo.md",
     "reference/configuration.md",
     "reference/hooks-events.md",
   ] },

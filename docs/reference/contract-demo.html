@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Contract — demo (example)</title>
+<style>
+:root{
+  --bg:#f6f7f9;--card:#fff;--text:#1b1f24;--muted:#667085;--border:#e4e7ec;
+  --accent:#2563eb;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box}
+body{
+  margin:0;font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+  color:var(--text);background:var(--bg);
+}
+.topbar{
+  position:sticky;top:0;z-index:2;background:var(--card);
+  border-bottom:1px solid var(--border);padding:14px 20px;
+}
+.topbar h1{margin:0;font-size:20px}
+.meta{color:var(--muted);display:flex;gap:10px;align-items:center;margin-top:4px;flex-wrap:wrap}
+.layout{display:grid;grid-template-columns:280px 1fr;min-height:calc(100vh - 70px)}
+.sidebar{border-right:1px solid var(--border);background:#fbfbfc}
+.sidebar-inner{position:sticky;top:70px;padding:16px;max-height:calc(100vh - 70px);overflow:auto}
+.sidebar h3{margin:14px 0 6px;font-size:12px;text-transform:uppercase;color:var(--muted)}
+.nav-list{list-style:none;padding:0;margin:0}
+.nav-list li{margin:4px 0}
+.nav-list a{color:var(--text);text-decoration:none}
+.nav-list a:hover{color:var(--accent)}
+.sidebar input{width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:8px}
+.content{padding:20px;max-width:1100px}
+section{margin-bottom:28px}
+h2{margin:0 0 10px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px 16px;margin:12px 0}
+.card-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap}
+.card h3{margin:0;font-size:16px}
+h4{margin:12px 0 6px}
+.badges{display:flex;gap:6px;flex-wrap:wrap}
+.badge{font-size:12px;padding:2px 8px;border-radius:999px;background:#eef2ff;color:#3730a3;border:1px solid #e0e7ff}
+.badge-rpc{background:#ecfeff;color:#155e75;border-color:#cffafe}
+.badge-task{background:#fff7ed;color:#9a3412;border-color:#ffedd5}
+.badge-event{background:#f0fdf4;color:#166534;border-color:#dcfce7}
+.badge-queue,.badge-val,.badge-ver{background:#f2f4f7;color:#344054;border-color:#e4e7ec}
+table.params{width:100%;border-collapse:collapse;margin:8px 0}
+th,td{border-bottom:1px solid var(--border);padding:8px 6px;text-align:left;vertical-align:top}
+th{font-size:12px;color:var(--muted);text-transform:uppercase}
+code,pre{font-family:var(--mono)}
+pre{background:#0b1020;color:#e6edf3;padding:12px;border-radius:8px;overflow:auto;margin:8px 0}
+details.schema{margin:8px 0}
+details.schema>summary{cursor:pointer;color:var(--accent);font-weight:600}
+.muted{color:var(--muted)}
+.subscriber{border-top:1px dashed var(--border);margin-top:10px;padding-top:10px}
+.sub-head{display:flex;gap:8px;align-items:center;justify-content:space-between;flex-wrap:wrap}
+@media (max-width:900px){
+  .layout{grid-template-columns:1fr}
+  .sidebar{border-right:0;border-bottom:1px solid var(--border)}
+  .sidebar-inner{position:static;max-height:none}
+}
+@media print{
+  .sidebar{display:none}
+  .layout{grid-template-columns:1fr}
+  .topbar{position:static}
+}
+</style>
+</head>
+<body>
+<header class="topbar"><div><h1>demo</h1><div class="meta"><span class="badge badge-ver">linkr/1.0-alpha</span><span>3 methods · 2 tasks · 2 event topics</span></div></div></header>
+<div class="layout">
+<nav class="sidebar"><div class="sidebar-inner"><input id="q" type="search" placeholder="Filter…" oninput="filterOps(this.value)" /><h3>Methods</h3><ul class="nav-list"><li><a href="#m-demo.contracts">demo.contracts</a></li><li><a href="#m-demo.math.add">demo.math.add</a></li><li><a href="#m-demo.users.get">demo.users.get</a></li></ul><h3>Tasks</h3><ul class="nav-list"><li><a href="#t-demo.email.send">demo.email.send</a></li><li><a href="#t-demo.reports.generate">demo.reports.generate</a></li></ul><h3>Events</h3><ul class="nav-list"><li><a href="#e-order.#">order.#</a></li><li><a href="#e-user.created">user.created</a></li></ul><h3>Sections</h3><ul class="nav-list"><li><a href="#components">Components</a></li></ul></div></nav>
+<main class="content">
+<section><h2>Methods (RPC)</h2><article class="card op" id="m-demo.contracts" data-filter-text="demo.contracts demo.contracts demo contracts "><div class="card-head"><h3><code>demo.contracts</code></h3><div class="badges"><span class="badge badge-rpc">RPC</span><span class="badge badge-queue">queue: demo</span></div></div><h4>Parameters</h4><p class="muted">No parameters.</p><details class="schema"><summary>Input schema (args / kwds)</summary><pre>{
+  &quot;args_schema&quot;: {
+    &quot;type&quot;: &quot;array&quot;,
+    &quot;maxItems&quot;: 0
+  },
+  &quot;kwds_schema&quot;: {
+    &quot;type&quot;: &quot;object&quot;,
+    &quot;properties&quot;: {},
+    &quot;additionalProperties&quot;: false
+  }
+}</pre></details><details class="schema"><summary>Result schema</summary><pre>{
+  &quot;schema&quot;: {
+    &quot;additionalProperties&quot;: true,
+    &quot;type&quot;: &quot;object&quot;
+  }
+}</pre></details></article><article class="card op" id="m-demo.math.add" data-filter-text="demo.math.add demo.math.add demo.math add Add two integers and return the sum."><div class="card-head"><h3><code>demo.math.add</code></h3><div class="badges"><span class="badge badge-rpc">RPC</span><span class="badge badge-queue">queue: demo.math</span></div></div><p>Add two integers and return the sum.</p><h4>Parameters</h4><table class="params"><thead><tr><th>Name</th><th>Kind</th><th>Required</th><th>Default</th><th>Type</th></tr></thead><tbody><tr><td><code>x</code></td><td>positional_or_keyword (pos 0)</td><td class="req-yes">yes</td><td><code>—</code></td><td><code>integer</code></td></tr><tr><td><code>y</code></td><td>positional_or_keyword (pos 1)</td><td class="req-yes">yes</td><td><code>—</code></td><td><code>integer</code></td></tr></tbody></table><details class="schema"><summary>Input schema (args / kwds)</summary><pre>{
+  &quot;args_schema&quot;: {
+    &quot;type&quot;: &quot;array&quot;,
+    &quot;prefixItems&quot;: [
+      {
+        &quot;type&quot;: &quot;integer&quot;
+      },
+      {
+        &quot;type&quot;: &quot;integer&quot;
+      }
+    ],
+    &quot;items&quot;: false,
+    &quot;maxItems&quot;: 2
+  },
+  &quot;kwds_schema&quot;: {
+    &quot;type&quot;: &quot;object&quot;,
+    &quot;properties&quot;: {
+      &quot;x&quot;: {
+        &quot;type&quot;: &quot;integer&quot;
+      },
+      &quot;y&quot;: {
+        &quot;type&quot;: &quot;integer&quot;
+      }
+    },
+    &quot;required&quot;: [
+      &quot;x&quot;,
+      &quot;y&quot;
+    ],
+    &quot;additionalProperties&quot;: false
+  }
+}</pre></details><details class="schema"><summary>Result schema</summary><pre>{
+  &quot;schema&quot;: {
+    &quot;type&quot;: &quot;integer&quot;
+  }
+}</pre></details></article><article class="card op" id="m-demo.users.get" data-filter-text="demo.users.get demo.users.get demo.users get Return user information by identifier."><div class="card-head"><h3><code>demo.users.get</code></h3><div class="badges"><span class="badge badge-rpc">RPC</span><span class="badge badge-queue">queue: demo.users</span></div></div><p>Return user information by identifier.</p><h4>Parameters</h4><table class="params"><thead><tr><th>Name</th><th>Kind</th><th>Required</th><th>Default</th><th>Type</th></tr></thead><tbody><tr><td><code>user_id</code></td><td>positional_or_keyword (pos 0)</td><td class="req-yes">yes</td><td><code>—</code></td><td><code>integer</code></td></tr></tbody></table><details class="schema"><summary>Input schema (args / kwds)</summary><pre>{
+  &quot;args_schema&quot;: {
+    &quot;type&quot;: &quot;array&quot;,
+    &quot;prefixItems&quot;: [
+      {
+        &quot;type&quot;: &quot;integer&quot;
+      }
+    ],
+    &quot;items&quot;: false,
+    &quot;maxItems&quot;: 1
+  },
+  &quot;kwds_schema&quot;: {
+    &quot;type&quot;: &quot;object&quot;,
+    &quot;properties&quot;: {
+      &quot;user_id&quot;: {
+        &quot;type&quot;: &quot;integer&quot;
+      }
+    },
+    &quot;required&quot;: [
+      &quot;user_id&quot;
+    ],
+    &quot;additionalProperties&quot;: false
+  }
+}</pre></details><details class="schema"><summary>Result schema</summary><pre>{
+  &quot;schema&quot;: {
+    &quot;additionalProperties&quot;: true,
+    &quot;type&quot;: &quot;object&quot;
+  }
+}</pre></details></article></section>
+<section><h2>Tasks</h2><article class="card op" id="t-demo.email.send" data-filter-text="demo.email.send demo.email.send demo.email send Send an email message (fire-and-forget task)."><div class="card-head"><h3><code>demo.email.send</code></h3><div class="badges"><span class="badge badge-task">TASK</span><span class="badge badge-queue">queue: demo.email</span></div></div><p>Send an email message (fire-and-forget task).</p><h4>Parameters</h4><table class="params"><thead><tr><th>Name</th><th>Kind</th><th>Required</th><th>Default</th><th>Type</th></tr></thead><tbody><tr><td><code>to</code></td><td>positional_or_keyword (pos 0)</td><td class="req-yes">yes</td><td><code>—</code></td><td><code>string</code></td></tr><tr><td><code>subject</code></td><td>positional_or_keyword (pos 1)</td><td class="req-yes">yes</td><td><code>—</code></td><td><code>string</code></td></tr><tr><td><code>body</code></td><td>positional_or_keyword (pos 2)</td><td class="req-yes">yes</td><td><code>—</code></td><td><code>string</code></td></tr></tbody></table><details class="schema"><summary>Input schema (args / kwds)</summary><pre>{
+  &quot;args_schema&quot;: {
+    &quot;type&quot;: &quot;array&quot;,
+    &quot;prefixItems&quot;: [
+      {
+        &quot;type&quot;: &quot;string&quot;
+      },
+      {
+        &quot;type&quot;: &quot;string&quot;
+      },
+      {
+        &quot;type&quot;: &quot;string&quot;
+      }
+    ],
+    &quot;items&quot;: false,
+    &quot;maxItems&quot;: 3
+  },
+  &quot;kwds_schema&quot;: {
+    &quot;type&quot;: &quot;object&quot;,
+    &quot;properties&quot;: {
+      &quot;to&quot;: {
+        &quot;type&quot;: &quot;string&quot;
+      },
+      &quot;subject&quot;: {
+        &quot;type&quot;: &quot;string&quot;
+      },
+      &quot;body&quot;: {
+        &quot;type&quot;: &quot;string&quot;
+      }
+    },
+    &quot;required&quot;: [
+      &quot;to&quot;,
+      &quot;subject&quot;,
+      &quot;body&quot;
+    ],
+    &quot;additionalProperties&quot;: false
+  }
+}</pre></details><p class="muted">No result (fire-and-forget).</p></article><article class="card op" id="t-demo.reports.generate" data-filter-text="demo.reports.generate demo.reports.generate demo.reports generate Generate a report by id."><div class="card-head"><h3><code>demo.reports.generate</code></h3><div class="badges"><span class="badge badge-task">TASK</span><span class="badge badge-queue">queue: demo.reports</span></div></div><p>Generate a report by id.</p><h4>Parameters</h4><table class="params"><thead><tr><th>Name</th><th>Kind</th><th>Required</th><th>Default</th><th>Type</th></tr></thead><tbody><tr><td><code>report_id</code></td><td>positional_or_keyword (pos 0)</td><td class="req-yes">yes</td><td><code>—</code></td><td><code>integer</code></td></tr><tr><td><code>full</code></td><td>positional_or_keyword (pos 1)</td><td class="req-no">no</td><td><code>false</code></td><td><code>boolean</code></td></tr></tbody></table><details class="schema"><summary>Input schema (args / kwds)</summary><pre>{
+  &quot;args_schema&quot;: {
+    &quot;type&quot;: &quot;array&quot;,
+    &quot;prefixItems&quot;: [
+      {
+        &quot;type&quot;: &quot;integer&quot;
+      },
+      {
+        &quot;type&quot;: &quot;boolean&quot;
+      }
+    ],
+    &quot;items&quot;: false,
+    &quot;maxItems&quot;: 2
+  },
+  &quot;kwds_schema&quot;: {
+    &quot;type&quot;: &quot;object&quot;,
+    &quot;properties&quot;: {
+      &quot;report_id&quot;: {
+        &quot;type&quot;: &quot;integer&quot;
+      },
+      &quot;full&quot;: {
+        &quot;type&quot;: &quot;boolean&quot;
+      }
+    },
+    &quot;required&quot;: [
+      &quot;report_id&quot;
+    ],
+    &quot;additionalProperties&quot;: false
+  }
+}</pre></details><p class="muted">No result (fire-and-forget).</p></article></section>
+<section><h2>Events</h2><article class="card op" id="e-order.#" data-filter-text="order.# on_order_event"><div class="card-head"><h3><code>order.#</code></h3><div class="badges"><span class="badge badge-event">EVENT</span></div></div><div class="subscriber"><div class="sub-head"><code>on_order_event</code><div class="badges"><span class="badge badge-queue">queue: demo.&lt;instance_id&gt;</span></div></div><p>Handle order lifecycle events.</p><table class="params"><thead><tr><th>Name</th><th>Kind</th><th>Required</th><th>Default</th><th>Type</th></tr></thead><tbody><tr><td><code>order_id</code></td><td>positional_or_keyword (pos 0)</td><td class="req-yes">yes</td><td><code>—</code></td><td><code>integer</code></td></tr><tr><td><code>status</code></td><td>positional_or_keyword (pos 1)</td><td class="req-yes">yes</td><td><code>—</code></td><td><code>string</code></td></tr></tbody></table><details class="schema"><summary>Payload schema (kwds)</summary><pre>{
+  &quot;kwds_schema&quot;: {
+    &quot;type&quot;: &quot;object&quot;,
+    &quot;properties&quot;: {
+      &quot;order_id&quot;: {
+        &quot;type&quot;: &quot;integer&quot;
+      },
+      &quot;status&quot;: {
+        &quot;type&quot;: &quot;string&quot;
+      }
+    },
+    &quot;required&quot;: [
+      &quot;order_id&quot;,
+      &quot;status&quot;
+    ],
+    &quot;additionalProperties&quot;: false
+  }
+}</pre></details></div></article><article class="card op" id="e-user.created" data-filter-text="user.created on_user_created"><div class="card-head"><h3><code>user.created</code></h3><div class="badges"><span class="badge badge-event">EVENT</span></div></div><div class="subscriber"><div class="sub-head"><code>on_user_created</code><div class="badges"><span class="badge badge-queue">queue: demo.&lt;instance_id&gt;</span></div></div><p>Handle a newly created user event.</p><table class="params"><thead><tr><th>Name</th><th>Kind</th><th>Required</th><th>Default</th><th>Type</th></tr></thead><tbody><tr><td><code>user_id</code></td><td>positional_or_keyword (pos 0)</td><td class="req-yes">yes</td><td><code>—</code></td><td><code>integer</code></td></tr><tr><td><code>email</code></td><td>positional_or_keyword (pos 1)</td><td class="req-yes">yes</td><td><code>—</code></td><td><code>string</code></td></tr></tbody></table><details class="schema"><summary>Payload schema (kwds)</summary><pre>{
+  &quot;kwds_schema&quot;: {
+    &quot;type&quot;: &quot;object&quot;,
+    &quot;properties&quot;: {
+      &quot;user_id&quot;: {
+        &quot;type&quot;: &quot;integer&quot;
+      },
+      &quot;email&quot;: {
+        &quot;type&quot;: &quot;string&quot;
+      }
+    },
+    &quot;required&quot;: [
+      &quot;user_id&quot;,
+      &quot;email&quot;
+    ],
+    &quot;additionalProperties&quot;: false
+  }
+}</pre></details></div></article></section>
+<section id="components"><h2>Components (schemas)</h2><p class="muted">None.</p></section>
+</main>
+</div>
+<script>
+function filterOps(query) {
+  const q = (query || "").toLowerCase();
+  document.querySelectorAll("[data-filter-text]").forEach((el) => {
+    const text = (el.dataset.filterText || "").toLowerCase();
+    el.style.display = !q || text.includes(q) ? "" : "none";
+  });
+}
+</script>
+</body>
+</html>

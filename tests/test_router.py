@@ -4,8 +4,9 @@ from dataclasses import dataclass
 
 import pytest
 
-from linkr import App, LocalBackend, QueueOptions
-from tests.helpers import call, emit, send
+import linkr
+from linkr import App, LocalBackend, QueueOptions, RPCRouter, TaskRouter
+from tests.helpers import call, send
 
 
 @dataclass(frozen=True)
@@ -18,7 +19,6 @@ class SpyBackend(LocalBackend):
         super().__init__()
         self.rpc_options: list[tuple[str, object]] = []
         self.task_options: list[tuple[str, object]] = []
-        self.event_options: list[tuple[str, tuple[str, ...], object]] = []
 
     async def consume_rpc(self, queue, handler, *, options=None):  # type: ignore[override]
         self.rpc_options.append((queue, options))
@@ -27,10 +27,6 @@ class SpyBackend(LocalBackend):
     async def consume_task(self, queue, handler, *, options=None):  # type: ignore[override]
         self.task_options.append((queue, options))
         await super().consume_task(queue, handler, options=options)
-
-    async def consume_event(self, queue, topics, handler, *, options=None):  # type: ignore[override]
-        self.event_options.append((queue, tuple(topics), options))
-        await super().consume_event(queue, topics, handler, options=options)
 
 
 class LegacyBackend(LocalBackend):
@@ -42,16 +38,16 @@ class LegacyBackend(LocalBackend):
     async def consume_task(self, queue, handler):  # type: ignore[override]
         await super().consume_task(queue, handler)
 
-    async def consume_event(self, queue, topics, handler):  # type: ignore[override]
-        await super().consume_event(queue, topics, handler)
-
 
 class TestRouter:
-    async def test_default_rpc_router_configures_default_queue_and_registers(self):
+    async def test_named_rpc_router_configures_queue_and_registers(self):
         backend = SpyBackend()
         app = App("orders", backend=backend)
 
-        router = app.router("rpc", options=[DummyQueueOptions("default-rpc")])
+        router = app.rpc_router("serviceA", options=[DummyQueueOptions("svc-a")])
+        assert isinstance(router, RPCRouter)
+        assert router.mode == "rpc"
+        assert router.path == "serviceA"
 
         @router("foo")
         def foo() -> str:
@@ -59,16 +55,19 @@ class TestRouter:
 
         async with app:
             await app.consume()
-            assert await call(app, "orders.foo") == "foo"
+            assert await call(app, "orders.serviceA.foo") == "foo"
 
-        assert ("orders", (DummyQueueOptions("default-rpc"),)) in backend.rpc_options
+        assert ("orders.serviceA", (DummyQueueOptions("svc-a"),)) in backend.rpc_options
 
-    async def test_default_task_router_configures_default_queue(self):
+    async def test_named_task_router_configures_queue(self):
         backend = SpyBackend()
         app = App("orders", backend=backend)
         seen: list[str] = []
 
-        router = app.router("task", options=[DummyQueueOptions("default-task")])
+        router = app.task_router("email", options=[DummyQueueOptions("email")])
+        assert isinstance(router, TaskRouter)
+        assert router.mode == "task"
+        assert router.path == "email"
 
         @router("cleanup")
         def cleanup(value: str) -> None:
@@ -76,16 +75,16 @@ class TestRouter:
 
         async with app:
             await app.consume()
-            await send(app, "orders.cleanup", "ok")
+            await send(app, "orders.email.cleanup", "ok")
 
         assert seen == ["ok"]
-        assert ("orders", (DummyQueueOptions("default-task"),)) in backend.task_options
+        assert ("orders.email", (DummyQueueOptions("email"),)) in backend.task_options
 
     async def test_named_rpc_router_groups_handlers_on_same_queue(self):
         backend = SpyBackend()
         app = App("orders", backend=backend)
 
-        router = app.router("rpc", path="serviceA.path1.path2", options=[DummyQueueOptions("grp")])
+        router = app.rpc_router("serviceA.path1.path2", options=[DummyQueueOptions("grp")])
 
         @router("bar")
         def bar() -> str:
@@ -106,12 +105,12 @@ class TestRouter:
         assert app.methods["baz"].queue == "orders.serviceA.path1.path2"
         assert ("orders.serviceA.path1.path2", (DummyQueueOptions("grp"),)) in backend.rpc_options
 
-    async def test_named_task_router_configures_group_queue(self):
+    async def test_named_task_router_groups_handlers_on_same_queue(self):
         backend = SpyBackend()
         app = App("orders", backend=backend)
         seen: list[str] = []
 
-        router = app.router("task", path="email", options=[DummyQueueOptions("email")])
+        router = app.task_router("email", options=[DummyQueueOptions("email")])
 
         @router("send")
         def send_email(user_id: int) -> None:
@@ -132,7 +131,7 @@ class TestRouter:
     async def test_options_apply_to_handlers_registered_via_app_api(self):
         backend = SpyBackend()
         app = App("orders", backend=backend)
-        app.router("task", path="email", options=[DummyQueueOptions("email")])
+        app.task_router("email", options=[DummyQueueOptions("email")])
 
         @app.task("email.send")
         def send_email(user_id: int) -> int:
@@ -143,28 +142,6 @@ class TestRouter:
 
         assert ("orders.email", (DummyQueueOptions("email"),)) in backend.task_options
 
-    async def test_event_router_configures_instance_queue(self):
-        backend = SpyBackend()
-        app = App("orders", backend=backend)
-        seen: list[int] = []
-
-        events = app.router("event", options=[DummyQueueOptions("events")])
-
-        @events("user.created")
-        def on_user_created(user_id: int) -> None:
-            seen.append(user_id)
-
-        async with app:
-            await app.consume()
-            await emit(app, "user.created", user_id=42)
-
-        assert seen == [42]
-        assert backend.event_options
-        queue, topics, options = backend.event_options[0]
-        assert queue == app._event_queue_name()
-        assert topics == ("user.created",)
-        assert options == (DummyQueueOptions("events"),)
-
     async def test_router_accepts_options_list_for_multiple_backends(self):
         backend = SpyBackend()
         app = App("orders", backend=backend)
@@ -174,7 +151,7 @@ class TestRouter:
             value: int
 
         opts = [DummyQueueOptions("rmq-like"), OtherOptions(7)]
-        app.router("rpc", path="billing", options=opts)
+        app.rpc_router("billing", options=opts)
 
         @app.method("billing.charge")
         def charge() -> str:
@@ -185,51 +162,55 @@ class TestRouter:
 
         assert ("orders.billing", tuple(opts)) in backend.rpc_options
 
+    async def test_path_is_required(self):
+        app = App("orders", backend=LocalBackend())
+        with pytest.raises((TypeError, ValueError)):
+            app.rpc_router()  # type: ignore[call-arg]
+        with pytest.raises(ValueError, match="queue path must not be empty"):
+            app.task_router("")
+
     async def test_idempotent_same_options_allowed(self):
         app = App("orders", backend=LocalBackend())
         opts = [DummyQueueOptions("x")]
-        app.router("rpc", path="svc", options=opts)
-        app.router("rpc", path="svc", options=opts)
+        app.rpc_router("svc", options=opts)
+        app.rpc_router("svc", options=opts)
 
     async def test_conflicting_options_rejected(self):
         app = App("orders", backend=LocalBackend())
-        app.router("rpc", path="svc", options=[DummyQueueOptions("a")])
+        app.rpc_router("svc", options=[DummyQueueOptions("a")])
         with pytest.raises(ValueError, match="already configured"):
-            app.router("rpc", path="svc", options=[DummyQueueOptions("b")])
+            app.rpc_router("svc", options=[DummyQueueOptions("b")])
 
     async def test_duplicate_option_types_rejected(self):
         app = App("orders", backend=LocalBackend())
         with pytest.raises(ValueError, match="duplicate queue options"):
-            app.router("rpc", path="svc", options=[DummyQueueOptions("a"), DummyQueueOptions("b")])
+            app.rpc_router("svc", options=[DummyQueueOptions("a"), DummyQueueOptions("b")])
 
     async def test_router_name_must_be_leaf(self):
         app = App("orders", backend=LocalBackend())
-        router = app.router("rpc", path="svc")
+        router = app.rpc_router("svc")
         with pytest.raises(ValueError, match="must not contain '.'"):
             router("sub.method")
-
-    async def test_event_router_rejects_path(self):
-        app = App("orders", backend=LocalBackend())
-        with pytest.raises(ValueError, match="does not accept a path"):
-            app.router("event", path="users")
+        with pytest.raises(ValueError, match="handler name must not be empty"):
+            router("")
 
     async def test_cannot_reconfigure_while_consuming(self):
         app = App("orders", backend=LocalBackend())
 
-        @app.method("foo")
+        @app.method("svc.foo")
         def foo() -> str:
             return "foo"
 
         async with app:
             await app.consume()
             with pytest.raises(RuntimeError, match="cannot configure queue while consuming"):
-                app.router("rpc", options=[DummyQueueOptions("late")])
+                app.rpc_router("svc", options=[DummyQueueOptions("late")])
 
     async def test_legacy_backend_without_options_param_still_works(self):
         backend = LegacyBackend()
         app = App("orders", backend=backend)
 
-        router = app.router("rpc", options=[DummyQueueOptions("x")])
+        router = app.rpc_router("svc", options=[DummyQueueOptions("x")])
 
         @router("foo")
         def foo() -> str:
@@ -237,4 +218,8 @@ class TestRouter:
 
         async with app:
             await app.consume()
-            assert await call(app, "orders.foo") == "foo"
+            assert await call(app, "orders.svc.foo") == "foo"
+
+    def test_old_router_api_removed(self):
+        assert not hasattr(linkr, "Router")
+        assert not hasattr(App, "router")

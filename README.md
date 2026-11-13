@@ -129,8 +129,8 @@ Event queue naming:
 
 | App name | Instance ID | Queue |
 |---|---|---|
-| `billing` | `abc123` | `billing.events.abc123` |
-| `billing` | `def456` | `billing.events.def456` |
+| `billing` | `abc123` | `billing.abc123` |
+| `billing` | `def456` | `billing.def456` |
 
 ```python
 async with App("billing", backend=backend) as app:
@@ -177,9 +177,13 @@ other topic subscriptions remain, only that topic is removed. Backends expose
 `stop_consume_events(queue=None, topic=None)` as execution commands; `App`
 decides when a queue/topic should be stopped.
 
-### Queue/router options
+### RPC/task router options
 
-Use `app.router(...)` to configure backend-specific options for a queue and (optionally) register handlers on it. Options are opaque to `App`: pass a list and the active backend selects the types it understands.
+Use `app.rpc_router(...)` / `app.task_router(...)` to configure backend-specific
+options for a named RPC/task queue and (optionally) register handlers on it.
+Routers do not apply to event queues and do not configure the default app queue
+(`app.name`) — default and event queue options are static backend
+configuration.
 
 ```python
 from linkr import App, LocalBackend
@@ -187,15 +191,15 @@ from linkr.backends.rmq import RmqQueueOptions  # backend-specific
 
 app = App("orders", backend=LocalBackend())
 
-# default queue (orders)
-rpc = app.router("rpc", options=[RmqQueueOptions(prefetch_count=5, durable=True)])
+# named RPC queue (orders.serviceA)
+rpc = app.rpc_router("serviceA", options=[RmqQueueOptions(prefetch_count=5, durable=True)])
 
 @rpc("ping")
 def ping() -> str:
     return "pong"
 
-# named queue (orders.email), shared by handlers
-email = app.router("task", path="email", options=[RmqQueueOptions(prefetch_count=50)])
+# named task queue (orders.email), shared by handlers
+email = app.task_router("email", options=[RmqQueueOptions(prefetch_count=50)])
 
 @email("send")
 async def send(user_id: int) -> None:
@@ -204,9 +208,16 @@ async def send(user_id: int) -> None:
 await app.consume()
 ```
 
-- `path=None` targets the default app queue for rpc/task (or the instance event queue for `mode="event"`); `path="..."` targets `app.<path>`.
-- `@router("name")` registers a leaf handler on that queue (`<path>.<name>` or `<name>` for the default queue). Handlers registered via `@app.method/task/subscribe` on the same resolved queue use the same configured options.
-- Configure before `consume_*`. One queue has one option set (identical re-declaration is idempotent, conflicting raises; cannot reconfigure while consuming). No declaration keeps backend/mode defaults. `LocalBackend` ignores transport options.
+- `path` is required and must not be empty; it targets the named queue
+  `app.<path>`.
+- `@router("name")` registers a leaf handler on that queue (`<path>.<name>`).
+  The handler name must not contain `.`.
+- Options are opaque to `App`: pass a `QueueOptions` instance or a list and the
+  active backend selects the types it understands.
+- Configure before `consume_*`. One queue has one option set (identical
+  re-declaration is idempotent, conflicting raises; cannot reconfigure while
+  consuming). No declaration keeps backend defaults. `LocalBackend` ignores
+  transport options.
 
 ## Middleware
 
@@ -217,20 +228,20 @@ await app.consume()
 
 ```python
 import logging
-
+from collections.abc import Awaitable, Callable
 from typing import Any
 
-from linkr import AppMiddleware, LocalBackend, App
+from linkr import App, AppMiddleware, LocalBackend
 from linkr.models import Request, Response
 
 
 class LoggingMiddleware(AppMiddleware):
     async def dispatch_client(
         self,
-        call_next,
+        call_next: Callable[[], Awaitable[Response | None]],
         request: Request,
         *,
-        kwds: dict[str, Any] | None = None,
+        context: dict[str, Any],
     ) -> Response | None:
         logging.info("[%s] Calling %s", request.id, request.data.get("method") or request.data.get("topic"))
         response = await call_next()
@@ -240,18 +251,11 @@ class LoggingMiddleware(AppMiddleware):
 
     async def dispatch_server(
         self,
-        call_next,
+        call_next: Callable[[], Awaitable[Response | None]],
         request: Request,
-        request_message: Message,
-        *,
-        kwds: dict[str, Any] | None = None,
     ) -> Response | None:
         logging.info("[%s] Calling %s", request.id, request.data.get("method") or request.data.get("topic"))
         return await call_next()
-
-
-app = App("orders", backend=LocalBackend())
-app.add_middleware(LoggingMiddleware())
 ```
 
 For task and event messages the response path is skipped.
@@ -270,7 +274,7 @@ Custom wire middleware inherits from `WireMiddleware`:
 
 ```python
 import gzip
-
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from linkr import WireMiddleware
@@ -280,11 +284,11 @@ from linkr.models import Message, Request, Response
 class CustomCompression(WireMiddleware):
     async def dispatch_client(
         self,
-        call_next,
-        request_message: Message,
+        call_next: Callable[[], Awaitable[Message | None]],
         request: Request,
+        request_message: Message,
         *,
-        kwds: dict[str, Any] | None = None,
+        context: dict[str, Any],
     ) -> Message | None:
         if len(request_message.data) >= 1024:
             request_message.data = gzip.compress(request_message.data)
@@ -296,10 +300,8 @@ class CustomCompression(WireMiddleware):
 
     async def dispatch_server(
         self,
-        call_next,
+        call_next: Callable[[], Awaitable[tuple[Message, Response] | tuple[None, None]]],
         request_message: Message,
-        *,
-        kwds: dict[str, Any] | None = None,
     ) -> tuple[Message, Response] | tuple[None, None]:
         if "gzip" in request_message.headers.get("content_encoding", ""):
             request_message.data = gzip.decompress(request_message.data)
@@ -381,7 +383,7 @@ Custom exception handlers:
 
 ```python
 @app.exception_handler(ValueError)
-def handle_value_error(exc: Exception):
+def handle_value_error(exc: Exception) -> tuple[str, str, dict[str, str]]:
     return ("InvalidValueError", str(exc), {"field": "x"})
 ```
 

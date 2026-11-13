@@ -36,17 +36,19 @@ def ping(db: Depends[Database, db_factory]) -> str:
 
 ```python
 @app.method("op")
-def op(db: Depends[Database, lambda: Database("postgres://...")]):
-    ...
+def op(db: Depends[Database, lambda: Database("postgres://...")]) -> str:
+    return db.url
 ```
 
 **Singleton-like (factory-managed cache):**
 
 ```python
-def singleton_db_factory():
-    instance = None
+from collections.abc import Callable
 
-    def factory():
+def singleton_db_factory() -> Callable[[], Database]:
+    instance: Database | None = None
+
+    def factory() -> Database:
         nonlocal instance
         if instance is None:
             instance = Database("postgres://...")
@@ -57,8 +59,8 @@ def singleton_db_factory():
 get_db = singleton_db_factory()
 
 @app.method("op")
-def op(db: Depends[Database, get_db]):
-    ...
+def op(db: Depends[Database, get_db]) -> str:
+    return db.url
 ```
 
 **Callable object factory:**

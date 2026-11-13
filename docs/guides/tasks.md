@@ -79,7 +79,7 @@ def run_a(n: int) -> None:
 def run_b(n: int) -> None:
     print("B", n)
 
-async def main():
+async def main() -> None:
     async with worker_a, worker_b, client:
         await worker_a.consume()
         await worker_b.consume()

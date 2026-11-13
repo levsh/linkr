@@ -13,6 +13,7 @@ from linkr import (
     JsonSerializer,
     LocalBackend,
     RPCError,
+    RequestError,
     WireMiddleware,
     get_current_request,
 )
@@ -40,7 +41,7 @@ class TestAppCore:
         await app.consume()
         assert await call(app, "app.add", 2, 3) == 5
 
-    async def test_call_with_kwds(self, app: App):
+    async def test_call_with_context(self, app: App):
         @app.method("add")
         def add(x: int, y: int) -> int:
             return x + y
@@ -177,7 +178,7 @@ class TestAppCore:
         events: list[str] = []
 
         class AuthMiddleware(AppMiddleware):
-            async def dispatch_server(self, call_next, request, request_message, *, kwds=None):
+            async def dispatch_server(self, call_next, request):
                 events.append("auth_check")
                 raise RPCError(
                     error_code="Unauthorized",
@@ -234,7 +235,7 @@ class TestAppLifecycle:
             await app.consume()
 
     async def test_default_timeout(self):
-        app = App("app", backend=LocalBackend(), timeout=0.1)
+        app = App("app", backend=LocalBackend(), rpc_timeout=0.1)
         await app.init()
 
         @app.method("sleep")
@@ -267,13 +268,13 @@ class TestAppMiddleware:
         events: list[str] = []
 
         class TestMiddleware(AppMiddleware):
-            async def dispatch_client(self, call_next, request, *, kwds=None):
+            async def dispatch_client(self, call_next, request, *, context=None):
                 events.append("process_request")
                 response = await call_next()
                 events.append("process_response")
                 return response
 
-            async def dispatch_server(self, call_next, request, request_message, *, kwds=None):
+            async def dispatch_server(self, call_next, request):
                 events.append("process_request")
                 response = await call_next()
                 events.append("process_response")
@@ -298,26 +299,26 @@ class TestAppMiddleware:
         events: list[str] = []
 
         class MwA(AppMiddleware):
-            async def dispatch_client(self, call_next, request, *, kwds=None):
+            async def dispatch_client(self, call_next, request, *, context=None):
                 events.append("A-process_request")
                 response = await call_next()
                 events.append("A-process_response")
                 return response
 
-            async def dispatch_server(self, call_next, request, request_message, *, kwds=None):
+            async def dispatch_server(self, call_next, request):
                 events.append("A-process_request")
                 response = await call_next()
                 events.append("A-process_response")
                 return response
 
         class MwB(AppMiddleware):
-            async def dispatch_client(self, call_next, request, *, kwds=None):
+            async def dispatch_client(self, call_next, request, *, context=None):
                 events.append("B-process_request")
                 response = await call_next()
                 events.append("B-process_response")
                 return response
 
-            async def dispatch_server(self, call_next, request, request_message, *, kwds=None):
+            async def dispatch_server(self, call_next, request):
                 events.append("B-process_request")
                 response = await call_next()
                 events.append("B-process_response")
@@ -373,26 +374,26 @@ class TestAppMiddleware:
         events: list[str] = []
 
         class MwA(WireMiddleware):
-            async def dispatch_client(self, call_next, request_message, request, *, kwds=None):
+            async def dispatch_client(self, call_next, request, request_message, *, context=None):
                 events.append("A-send")
                 response = await call_next()
                 events.append("A-receive")
                 return response
 
-            async def dispatch_server(self, call_next, request_message, *, kwds=None):
+            async def dispatch_server(self, call_next, request_message):
                 events.append("A-receive")
                 result = await call_next()
                 events.append("A-send")
                 return result
 
         class MwB(WireMiddleware):
-            async def dispatch_client(self, call_next, request_message, request, *, kwds=None):
+            async def dispatch_client(self, call_next, request, request_message, *, context=None):
                 events.append("B-send")
                 response = await call_next()
                 events.append("B-receive")
                 return response
 
-            async def dispatch_server(self, call_next, request_message, *, kwds=None):
+            async def dispatch_server(self, call_next, request_message):
                 events.append("B-receive")
                 result = await call_next()
                 events.append("B-send")
@@ -426,11 +427,11 @@ class TestAppMiddleware:
         server_headers: list[dict[str, str]] = []
 
         class HeaderInjector(WireMiddleware):
-            async def dispatch_client(self, call_next, request_message, request, *, kwds=None):
+            async def dispatch_client(self, call_next, request, request_message, *, context=None):
                 request_message.headers["x-custom"] = "test-value"
                 return await call_next()
 
-            async def dispatch_server(self, call_next, request_message, *, kwds=None):
+            async def dispatch_server(self, call_next, request_message):
                 server_headers.append(dict(request_message.headers))
                 return await call_next()
 
@@ -486,7 +487,7 @@ class TestAppTimeoutsRouting:
         await app.close()
 
     async def test_default_ttl(self):
-        app = App("app", backend=LocalBackend(), ttl=10)
+        app = App("app", backend=LocalBackend(), rpc_ttl=10)
         headers: dict[str, object] = {}
 
         @app.method("ping")
@@ -501,7 +502,7 @@ class TestAppTimeoutsRouting:
         await app.close()
 
     async def test_default_rttl(self):
-        app = App("app", backend=LocalBackend(), rttl=60)
+        app = App("app", backend=LocalBackend(), rpc_rttl=60)
 
         @app.method("ping")
         def ping() -> str:
@@ -527,7 +528,7 @@ class TestAppTimeoutsRouting:
         await app.close()
 
     async def test_task_ttl_from_default(self):
-        app = App("app", backend=LocalBackend(), ttl=7)
+        app = App("app", backend=LocalBackend(), rpc_ttl=7)
         headers: dict[str, object] = {}
 
         @app.task("test")
@@ -862,7 +863,7 @@ class TestAppMultiSerializer:
         assert await app.call("app.ping", (), {}, serializer="jsonrpc2.0") == "pong"
         await app.close()
 
-    async def test_unknown_serializer_raises_rpc_error(self):
+    async def test_unknown_serializer_raises_request_error(self):
         app = App("app", backend=LocalBackend())
 
         @app.method("ping")
@@ -871,9 +872,9 @@ class TestAppMultiSerializer:
 
         await app.init()
         await app.consume()
-        with pytest.raises(RPCError) as exc_info:
+        with pytest.raises(RequestError) as exc_info:
             await app.call("app.ping", (), {}, serializer="missing")
-        assert exc_info.value.error_code == ErrorCode.VALIDATION_ERROR
+        assert "unknown serializer: missing" in str(exc_info.value)
         await app.close()
 
     async def test_jsonrpc_rejects_task_request(self):
@@ -1000,7 +1001,7 @@ class TestStopConsume:
         assert "email.send" not in app.tasks
 
     async def test_stop_consume_tasks_unknown_raises(self, app: App):
-        with pytest.raises(ValueError, match="Task handler not registered"):
+        with pytest.raises(ValueError, match="task handler not registered"):
             await app.stop_consume_tasks("missing")
 
     async def test_stop_consume_events_specific_topic_keeps_others(self):
@@ -1070,7 +1071,7 @@ class TestStopConsume:
         assert app._subscription_patterns == set()
 
     async def test_stop_consume_events_unknown_raises(self, app: App):
-        with pytest.raises(ValueError, match="Event subscription not registered"):
+        with pytest.raises(ValueError, match="event subscription not registered"):
             await app.stop_consume_events("missing")
 
     async def test_stop_consume_rpc_then_reconsume(self, app: App):

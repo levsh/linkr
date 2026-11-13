@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
 from collections.abc import Callable
@@ -23,6 +24,8 @@ ConsumeStopReason = Literal["all", "queue_drained", "topic_unsubscribed"]
 
 
 class ConsumeStartEvent(NamedTuple):
+    """Event emitted when consuming starts for a queue."""
+
     app: str
     mode: Mode
     queue: str
@@ -30,6 +33,8 @@ class ConsumeStartEvent(NamedTuple):
 
 
 class ConsumeStopEvent(NamedTuple):
+    """Event emitted when consuming stops or a subscription is removed."""
+
     app: str
     mode: Mode
     queue: str | None
@@ -38,6 +43,8 @@ class ConsumeStopEvent(NamedTuple):
 
 
 class RequestPublishedEvent(NamedTuple):
+    """Event emitted after a client-side request publish/send attempt completes."""
+
     app: str
     request: Request
     outcome: Literal["ok", "error"]
@@ -45,6 +52,8 @@ class RequestPublishedEvent(NamedTuple):
 
 
 class ResponseReceivedEvent(NamedTuple):
+    """Event emitted after a client-side RPC response/outcome is received."""
+
     app: str
     request: Request
     response: Any
@@ -53,6 +62,8 @@ class ResponseReceivedEvent(NamedTuple):
 
 
 class RequestReceivedEvent(NamedTuple):
+    """Event emitted after an incoming request is deserialized."""
+
     app: str
     mode: Mode
     queue: str
@@ -60,6 +71,8 @@ class RequestReceivedEvent(NamedTuple):
 
 
 class BeforeHandlerEvent(NamedTuple):
+    """Event emitted before a handler is executed."""
+
     app: str
     mode: Mode
     queue: str
@@ -69,6 +82,8 @@ class BeforeHandlerEvent(NamedTuple):
 
 
 class AfterHandlerEvent(NamedTuple):
+    """Event emitted after a handler completes successfully."""
+
     app: str
     mode: Mode
     queue: str
@@ -79,6 +94,8 @@ class AfterHandlerEvent(NamedTuple):
 
 
 class HandlerErrorEvent(NamedTuple):
+    """Event emitted when a handler fails or times out."""
+
     app: str
     mode: Mode
     queue: str
@@ -92,6 +109,8 @@ class HandlerErrorEvent(NamedTuple):
 
 
 class MessageDroppedEvent(NamedTuple):
+    """Event emitted when a message is dropped without handler execution."""
+
     app: str
     mode: Mode | None
     queue: str | None
@@ -111,10 +130,16 @@ class HookPoint(Generic[E]):
     """Subscription point for a specific hook event."""
 
     def __init__(self, name: str) -> None:
+        """
+        Args:
+            name: Human-readable name for this hook point.
+        """
         self.name = name
         self._listeners: list[Listener[E]] = []
 
     def subscribe(self, listener: Listener[E]) -> Listener[E]:
+        """Register *listener* for this hook point. Returns the listener."""
+
         if listener not in self._listeners:
             self._listeners.append(listener)
         return listener
@@ -122,6 +147,8 @@ class HookPoint(Generic[E]):
     __iadd__ = subscribe
 
     def unsubscribe(self, listener: Listener[E]) -> None:
+        """Remove *listener* from this hook point (no-op if not registered)."""
+
         try:
             self._listeners.remove(listener)
         except ValueError:
@@ -135,15 +162,22 @@ class HookPoint(Generic[E]):
         return bool(self._listeners)
 
     async def emit(self, event: E) -> None:
+        """Emit *event* to all registered listeners concurrently."""
+
         if not self._listeners:
             return
-        for listener in list(self._listeners):
+
+        listeners = list(self._listeners)
+
+        async def run_listener(listener: Listener[E]) -> None:
             try:
                 result = listener(event)
                 if inspect.isawaitable(result):
                     await result
             except Exception:
                 logger.exception("Hook listener failed: %s", self.name)
+
+        await asyncio.gather(*(run_listener(listener) for listener in listeners))
 
 
 class AppHooks:
@@ -194,6 +228,7 @@ class HookRegistry:
     """Registry of hook points for an :class:`App`."""
 
     def __init__(self) -> None:
+        """Create a registry with all built-in hook points."""
         self.on_consume_start: HookPoint[ConsumeStartEvent] = HookPoint("on_consume_start")
         self.on_consume_stop: HookPoint[ConsumeStopEvent] = HookPoint("on_consume_stop")
         self.on_request_published: HookPoint[RequestPublishedEvent] = HookPoint("on_request_published")
@@ -209,9 +244,11 @@ class HookRegistry:
         return getattr(self, name)
 
     async def emit(self, name: str, event: Any) -> None:
+        """Emit *event* to the hook point named *name*."""
         await self._point(name).emit(event)
 
     def add_hooks(self, hooks: AppHooks) -> None:
+        """Register all non-default hook methods of *hooks*."""
         key = id(hooks)
         if key in self._hook_objects:
             return
@@ -227,6 +264,7 @@ class HookRegistry:
             self._hook_objects[key] = bound
 
     def remove_hooks(self, hooks: AppHooks) -> None:
+        """Unregister all hook methods previously registered from *hooks*."""
         key = id(hooks)
         bound = self._hook_objects.pop(key, None)
         if bound is None:

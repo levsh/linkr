@@ -5,12 +5,12 @@ Hooks provide an observer mechanism for app-level events: consume lifecycle, cli
 ## Registering hooks
 
 ```python
-from linkr import App, AppHooks, LocalBackend
+from linkr import AfterHandlerEvent, App, AppHooks, HandlerErrorEvent, LocalBackend
 
 app = App("orders", backend=LocalBackend())
 
 class MyHooks(AppHooks):
-    async def after_handler(self, event):
+    async def after_handler(self, event: AfterHandlerEvent) -> None:
         print(event.handler.name, event.result)
 
 app.add_hooks(MyHooks())
@@ -24,7 +24,7 @@ Ways to subscribe:
 
 ```python
 @app.hooks.on_handler_error
-async def on_error(event):
+async def on_error(event: HandlerErrorEvent) -> None:
     ...
 ```
 
@@ -129,22 +129,29 @@ Fields: `app`, `mode`, `queue`, `topic`, `reason`.
 ## Example: metrics and tracing hooks
 
 ```python
-from linkr import AppHooks
+from linkr import (
+    AfterHandlerEvent,
+    AppHooks,
+    HandlerErrorEvent,
+    MessageDroppedEvent,
+    RequestPublishedEvent,
+    ResponseReceivedEvent,
+)
 
 class MetricsHooks(AppHooks):
-    async def on_request_published(self, event):
+    async def on_request_published(self, event: RequestPublishedEvent) -> None:
         metrics.increment("published", event.request.type, event.outcome)
 
-    async def on_response_received(self, event):
+    async def on_response_received(self, event: ResponseReceivedEvent) -> None:
         metrics.increment("rpc_response", event.outcome)
 
-    async def after_handler(self, event):
+    async def after_handler(self, event: AfterHandlerEvent) -> None:
         metrics.increment("handler_ok", event.mode, event.handler.name)
 
-    async def on_handler_error(self, event):
+    async def on_handler_error(self, event: HandlerErrorEvent) -> None:
         metrics.increment("handler_error", event.mode, event.outcome)
 
-    async def on_message_dropped(self, event):
+    async def on_message_dropped(self, event: MessageDroppedEvent) -> None:
         metrics.increment("dropped", event.mode, event.reason)
 
 app.add_hooks(MetricsHooks())

@@ -2,6 +2,26 @@
 
 Error behavior differs by delivery mode: RPC can return structured errors to the caller, while tasks and events report failures through logging and hooks.
 
+## Exception hierarchy
+
+All exceptions raised by linkr derive from `LinkrError`:
+
+- `RPCError` — error resulting from an RPC call (server error response or client-side timeout). Carries `error_code`, `error_message`, `error_details`.
+- `RequestError` — local or transport-level error when preparing/sending a request (e.g. unknown serializer, serialization failure). Not tied to an RPC response.
+
+```python
+from linkr import LinkrError, RPCError, RequestError
+
+try:
+    await app.call("orders.missing", (), {})
+except RPCError as exc:
+    print(exc.error_code)     # e.g. "MethodNotFound"
+except RequestError as exc:
+    print(exc.error_message)
+except LinkrError as exc:
+    print(exc)
+```
+
 ## `RPCError` and `ErrorCode`
 
 RPC failures raised to callers use `RPCError`:
@@ -54,8 +74,8 @@ Map exceptions from RPC handlers to structured error responses:
 
 ```python
 @app.exception_handler(ValueError)
-def handle_value_error(exc: Exception):
-    return ("InvalidValue", str(exc), {"field": "x"})
+def handle_value_error(exc: Exception) -> tuple[str, str, dict[str, str]]:
+    return ("InvalidValueError", str(exc), {"field": "x"})
 
 # other supported return forms include dict/str/ErrorInfo-compatible data
 ```
@@ -87,14 +107,14 @@ from linkr import App, ErrorCode, LocalBackend, RPCError
 app = App("svc", backend=LocalBackend(), validate_types=True)
 
 @app.exception_handler(PermissionError)
-def on_permission(exc: Exception):
+def on_permission(exc: Exception) -> tuple[str, str]:
     return ("PermissionDenied", str(exc))
 
 @app.method("secure")
 def secure() -> None:
     raise PermissionError("denied")
 
-async def main():
+async def main() -> None:
     async with app:
         await app.consume()
         try:

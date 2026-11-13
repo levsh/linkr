@@ -59,7 +59,7 @@ await app.call(
 
 - Per-call: `timeout`, `ttl`, `rttl`.
 - App defaults: `App(..., timeout=..., ttl=..., rttl=...)`.
-- Built-in RPC defaults: `RPC_TIMEOUT = 3600.0`, `RPC_TTL = 3600.0`.
+- Built-in RPC defaults: `RPC_TIMEOUT = 300.0`, `RPC_TTL = 300.0`.
 
 Client-side waiting is bounded by the effective timeout/ttl window; if no response arrives in time, `RPCError` with `ErrorCode.TIMEOUT` is raised.
 
@@ -90,7 +90,8 @@ server = App("server", backend=backend)
 client = App("client", backend=backend)
 
 @server.method("echo")
-def echo(value): return value
+def echo(value: str) -> str:
+    return value
 
 async with server, client:
     await server.consume()

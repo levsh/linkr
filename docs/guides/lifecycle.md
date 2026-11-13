@@ -25,14 +25,19 @@ async with App("orders", backend=backend) as app:
 - `init()` initializes the backend and middleware.
 - `close(timeout=None)` stops consuming, closes middleware and backend, and marks the app closed. Operations after close raise `RuntimeError`.
 
-## Queue/router configuration and consume
+## Named queue/router configuration and consume
 
-Per-queue transport options are configured with `app.router(mode, path=None, *, options=[...])` and applied when the queue starts consuming.
+Per-queue transport options for **named RPC/task queues** are configured with
+`app.rpc_router(path, *, options=[...])` / `app.task_router(path, *, options=[...])`
+and applied when the queue starts consuming. `path` is required and targets
+queue `app.name.<path>`.
+
+The default app queue (`app.name`) and event queues are not configured via
+routers; they use backend-static defaults.
 
 ```python
-rpc = app.router("rpc", options=[...])              # default rpc queue (app.name)
-jobs = app.router("task", path="jobs", options=[...])  # named queue (app.name.jobs)
-app.router("event", options=[...])                  # event instance queue
+rpc = app.rpc_router("serviceA", options=[...])      # named RPC queue (orders.serviceA)
+jobs = app.task_router("jobs", options=[...])        # named task queue (orders.jobs)
 
 @rpc("ping")
 def ping() -> str:
@@ -41,15 +46,15 @@ def ping() -> str:
 
 Rules:
 
-- Declare/configure a queue **before** `consume_*` starts it. Configuring or changing options for an already-consuming queue raises `RuntimeError`.
-- The configuration unit is the queue `(mode, queue)` (shared by all handlers on that queue). Re-declaring the same queue with identical options is idempotent; different options raise `ValueError`. Duplicate option types in one options list are rejected.
-- `options=None` does not change an existing configuration (can be used to obtain a `Router` handle). With no declaration, backend/mode defaults apply.
-- `consume_*` passes the queue's configured options to the backend (`consume_rpc/task/event(..., options=...)`); backends select option types they understand and ignore the rest.
+- Declare/configure a named queue **before** `consume_*` starts it. Configuring or changing options for an already-consuming queue raises `RuntimeError`.
+- The configuration unit is the named queue `(mode, app.name.<path>)` (shared by all handlers on that queue). Re-declaring the same queue with identical options is idempotent; different options raise `ValueError`. Duplicate option types in one options list are rejected.
+- `options=None` does not change an existing configuration (can be used to obtain a router handle). With no declaration, backend defaults apply for that queue.
+- `consume_*` passes a named rpc/task queue's configured options to the backend (`consume_rpc/task(..., options=...)`); backends select option types they understand and ignore the rest. Event consumers are started without app-level queue options.
 - A stopped queue can be consumed again; `consume_*` re-reads the current queue configuration.
 
 ## Starting consumers
 
-Register handlers and configure queues first, then start consuming:
+Register handlers and configure named queues first, then start consuming:
 
 ```python
 @rpc("ping")
@@ -118,7 +123,7 @@ await backend.stop_consume_events(queue=None, topic=None)
 - `queue=<name>` — stop the specified queue consumer.
 - `queue=<event_queue>, topic=<pattern>` — remove only that topic subscription.
 
-`Backend.consume_rpc/task/event` accept an optional `options` argument for per-queue backend configuration. `Backend.stop_consume(mode=None)` exists as a deprecated compatibility shim.
+`Backend.consume_rpc/task` accept an optional `options` argument for per-queue backend configuration of named rpc/task queues. `Backend.consume_event` receives `(queue, topics, handler)` and uses backend-static configuration. `Backend.stop_consume(mode=None)` exists as a deprecated compatibility shim.
 
 ## Re-consuming
 

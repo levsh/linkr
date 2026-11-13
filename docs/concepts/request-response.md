@@ -74,7 +74,7 @@ Metadata for registered handlers (name, request type, function, signature, optio
 - `ttl`: default message TTL (seconds) for outgoing requests
 - `rttl`: default response TTL (seconds) for outgoing RPC requests
 
-Built-in defaults used for RPC when not set: `RPC_TIMEOUT = 3600.0`, `RPC_TTL = 3600.0`. The client waits for an RPC response up to `timeout + ttl` seconds.
+Built-in defaults used for RPC when not set: `RPC_TIMEOUT = 300.0`, `RPC_TTL = 300.0`. The client waits for an RPC response up to `timeout + ttl` seconds.
 
 Per-call overrides are available on `call`/`send`/`emit` (where applicable): `request_id`, `timeout`, `ttl`, `rttl` (RPC). See [Client API](../guides/client-api.md).
 
