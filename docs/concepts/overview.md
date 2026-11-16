@@ -1,63 +1,57 @@
 # Overview
 
-`linkr` centers around an **application** (`App`) that registers handlers, runs a consume loop, and sends messages through a **backend**. Messages are serialized, optionally transformed by middleware, and dispatched according to a delivery mode.
+**linkr** is an async messaging framework for Python that provides a unified API for request/response calls, background tasks, and pub/sub events over pluggable backends.
 
-## Core building blocks
+## What linkr provides
 
-| Component | Role |
+- A single `App` for lifecycle, hooks, middleware, and client operations (`call`/`send`/`emit`).
+- `Server` scopes for handler registration and per-server/per-mode consuming (`consume`/`stop_consume`).
+- Three delivery modes with consistent handler registration and client APIs:
+  - **RPC** (`@server.method`) — request/response
+  - **Task** (`@server.task`) — fire-and-forget to one consumer
+  - **Event** (`@server.subscribe`) — fan-out to matching subscribers
+- Pluggable backends (`LocalBackend` for in-process, `RmqBackend` for RabbitMQ) behind a common interface.
+- Extensibility: middleware (app-level and wire-level), hooks, serializers, dependency injection, and validation.
+
+## Core concepts
+
+| Concept | Description |
 |---|---|
-| `App` | Registers handlers, manages lifecycle/consume, builds requests, runs client/server pipelines |
-| `Backend` | Transport abstraction (`request`/`send`/`emit`, consume/stop operations) |
-| Serializer | Converts `Request`/`Response` to/from wire `Message` bytes |
-| Middleware | App-level (objects) and wire-level (bytes/headers) transformations around the pipeline |
-| Hooks | Observer notifications for lifecycle and message processing events |
-| Models | `Request`, `Response`, `Message`, `ErrorInfo`, `HandlerInfo` |
-
-## Message flow
-
-### Client side
-
-1. Build a `Request` (`rpc`/`task`/`event`) with id, payload, and headers (queue, timeout/ttl/rttl as applicable).
-2. Run **app middleware** (client).
-3. Serialize to a wire `Message`.
-4. Run **wire middleware** (client).
-5. Deliver via backend:
-   - RPC: `await backend.request(queue, message)` returns a `Future`; await it for the response.
-   - Task: `await backend.send(queue, message)`.
-   - Event: `await backend.emit(topic, message)`.
-6. Deserialize/interpret response (RPC) and return result or raise `RPCError`.
-
-### Server side
-
-1. Backend delivers a raw `Message` to the app handler for a queue/mode.
-2. Detect/select serializer and run **wire middleware** (server).
-3. Deserialize to `Request` and run **app middleware** (server).
-4. Dispatch by request type:
-   - RPC: resolve handler, validate args, run handler, return `Response(result|error)`.
-   - Task: resolve handler, validate/run; no response to caller.
-   - Event: find matching subscribers, validate/run each; no response.
-5. For RPC, serialize `Response` (respecting `rttl` header) and return it to backend.
+| `App` | Application: lifecycle, hooks, middleware, serializers, client API, and server factory. |
+| `Server` | Server scope bound to a queue/group: handler registration and consume/stop control by mode. |
+| Backend | Transport implementation responsible for queues, delivery, and request/response correlation. |
+| Handler | A function registered on a server for a mode (RPC/task/event). |
+| Topic | Event routing key matched against subscription patterns. |
 
 ## Delivery modes at a glance
 
-| Mode | Registration | Client | Consumers | Response |
+| Mode | Register | Invoke | Consumers | Response |
 |---|---|---|---|---|
-| RPC | `@app.method` | `app.call` | One (competing) | Yes |
-| Task | `@app.task` | `app.send` | One (competing) | No |
-| Event | `@app.subscribe` | `app.emit` | All matching subscribers (fan-out) | No |
+| RPC | `@server.method` | `app.client.call` | One (competing) | Yes |
+| Task | `@server.task` | `app.client.send` | One (competing) | No |
+| Event | `@server.subscribe` | `app.client.emit` | Matching subscribers on consuming servers (fan-out) | No |
 
-See [Delivery modes](delivery-modes.md) and [Routing and naming](routing-and-naming.md) for details.
+See [Delivery modes](delivery-modes.md) for details and [Routing and naming](routing-and-naming.md) for addressing rules.
 
-## Public API surface
+## Minimal example
 
-Common exports from `linkr`:
+```python
+import asyncio
 
-- Core: `App`, `get_current_request`, `Depends`
-- Backends/models: `Backend`, `LocalBackend`, `Mode`, `Message`, `Request`, `Response`, `RequestType`, `ResponseType`, `HandlerInfo`
-- Middleware: `BaseMiddleware`, `AppMiddleware`, `WireMiddleware`
-- Serialization: `Serializer`, `JsonSerializer`, `JsonRpcSerializer`
-- Errors: `ErrorCode`, `RPCError`, `ErrorInfo`
-- Hooks: `AppHooks`, `HookRegistry`, `HookPoint` and event types
+from linkr import App, LocalBackend
 
-!!! note
-    `RmqBackend` is provided in `linkr.backends.rmq` and requires the `rabbitmq` extra (`aio-pika`).
+
+async def main() -> None:
+    async with App("orders", backend=LocalBackend()) as app:
+        server = app.server()
+
+        @server.method("add")
+        def add(x: int, y: int) -> int:
+            return x + y
+
+        await server.consume(mode="rpc")
+        print(await app.client.call("orders.add", (2, 3), {}))  # 5
+
+
+asyncio.run(main())
+```

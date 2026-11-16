@@ -1,6 +1,6 @@
 # Events
 
-Events implement publish/subscribe: an emitted event is delivered to all matching subscribers (fan-out). Event handlers do not return responses.
+Events are published to a topic and delivered to matching subscribers on servers. Publishing is done via `app.client.emit(...)`; subscriptions and consuming are managed per `Server`.
 
 ## Subscribing
 
@@ -8,108 +8,64 @@ Events implement publish/subscribe: an emitted event is delivered to all matchin
 from linkr import App, LocalBackend
 
 app = App("billing", backend=LocalBackend())
+server = app.server()
 
-@app.subscribe("user.created")
+@server.subscribe("user.created")
 def on_user_created(user_id: int) -> None:
     ...
 
-@app.subscribe("user.*")
-def on_any_user_event(user_id: int | None = None, **event: object) -> None:
+@server.subscribe("user.*")
+def on_any_user_event(user_id: int) -> None:
     ...
 ```
 
-- `@app.subscribe(topic_pattern, **options)` registers a subscriber.
-- Each app instance receives events on its own event queue (`<app>.<instance_id>`), so multiple instances can all receive the same event.
-- Multiple subscribers in the same app for the same topic are all invoked.
-- `options` can include `validate_types=True|False`.
+- `@server.subscribe(topic_pattern, **options)` registers a subscriber on this server.
+- Each server has its **own event queue**; subscriptions on a server are consumed only by that server.
+- Supported handler options (see [Configuration](../reference/configuration.md)): e.g. `validate_types`.
+- The event payload is passed to handlers as keyword arguments.
+- Sync and async handlers are supported.
 
-## Emitting events
-
-```python
-await app.consume()
-
-await app.emit("user.created", {"user_id": 7})
-```
-
-Signature:
+## Emitting
 
 ```python
-await app.emit(
-    topic: str,
-    event: dict[str, Any],
-    *,
-    request_id: UUID | None = None,
-    ttl: float | None = None,
-    serializer: str | None = None,
-    context: dict[str, Any] | None = None,
-) -> None
+app = App("billing", backend=LocalBackend())
+server = app.server()
+
+@server.subscribe("user.created")
+def on_user_created(user_id: int) -> None:
+    ...
+
+await app.init()
+await server.consume(mode="event")
+await app.client.emit("user.created", {"user_id": 1})
 ```
+
+Signature: `app.client.emit(topic, event: dict, *, ttl=None, serializer=None, request_id=None, context=None)`.
 
 - `topic` is the concrete topic string to publish.
-- `event` is a dictionary passed to subscribers as **keyword arguments**.
-- Returns `None`.
+- `event` must be a `dict` of keyword arguments delivered to matching subscribers.
+- `emit` returns `None`.
 
-## Topic patterns and wildcards
+## Matching and delivery
 
-Subscriptions use topic patterns:
+- **Fan-out:** all servers with subscriptions whose patterns match the emitted topic receive the event (on their own event queues).
+- **Multiple subscribers in one server:** if multiple handlers in the same server match, all of them are invoked.
+- Wildcards:
+  - `*` matches exactly one segment (e.g. `user.*` matches `user.created`).
+  - `#` matches zero or more segments (e.g. `user.#` matches `user.created`, `user.profile.updated`).
 
-- `*` — matches exactly one segment (e.g. `user.*` matches `user.created`, not `user.profile.updated`)
-- `#` — matches zero or more segments (e.g. `user.#` matches `user.created` and `user.profile.updated`)
+## Errors and validation
 
-Patterns are matched against the full topic.
+- Subscriber exceptions are logged; they do not produce a response to the publisher.
+- Validation failures (when `validate_types` is enabled) prevent that subscriber invocation and are logged/dropped according to hooks.
 
-```python
-@app.subscribe("order.#")
-def on_order(topic_data: dict[str, object] | None = None, **event: object) -> None:
-    ...
-
-@app.subscribe("audit.*.created")
-def on_created(**event: object) -> None:
-    ...
-```
-
-## Delivery and errors
-
-- **Fan-out:** every subscribed instance with a matching pattern receives the event.
-- **No response:** subscribers cannot return a value to the emitter.
-- **No matching subscribers:** the event is not delivered to handlers (server-side drop/no-op behavior may be logged; hooks can observe this).
-- **Validation/exceptions:** argument validation failures and handler exceptions are logged and do not produce responses to the emitter. When multiple subscribers are invoked, failures are isolated per subscriber.
-
-## Observability
-
-Use [hooks](hooks.md) for monitoring:
-
-- Client: `on_request_published` (emit sent)
-- Server: `on_request_received`, `before_handler`/`after_handler`/`on_handler_error` (per subscriber), `on_message_dropped` with reason `no_subscribers` or `validation_failed`
-
-## Example: fan-out to multiple instances
+## Consuming
 
 ```python
-import asyncio
-from linkr import App, LocalBackend
+server = app.server()
 
-backend = LocalBackend()
-billing_a = App("billing", backend=backend)
-billing_b = App("billing", backend=backend)
-producer = App("producer", backend=backend)
-
-seen_a: list[int] = []
-seen_b: list[int] = []
-
-@billing_a.subscribe("user.created")
-def a(user_id: int) -> None:
-    seen_a.append(user_id)
-
-@billing_b.subscribe("user.created")
-def b(user_id: int) -> None:
-    seen_b.append(user_id)
-
-async def main() -> None:
-    async with billing_a, billing_b, producer:
-        await billing_a.consume()
-        await billing_b.consume()
-        await producer.emit("user.created", {"user_id": 1})
-        await asyncio.sleep(0)
-
-asyncio.run(main())
+await server.consume(mode="event")      # start event consuming for this server
+await server.stop_consume(mode="event") # pause event consuming (resumable)
 ```
+
+Consuming is controlled per server and mode. Stopping event consuming on a server pauses its subscriptions without removing them.

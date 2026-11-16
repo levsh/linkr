@@ -20,7 +20,7 @@ DropReason = Literal[
     "decode_error",
 ]
 
-ConsumeStopReason = Literal["all", "queue_drained", "topic_unsubscribed"]
+ConsumeStopReason = Literal["stopped", "all", "queue_drained", "topic_unsubscribed"]
 
 
 class ConsumeStartEvent(NamedTuple):
@@ -103,7 +103,7 @@ class HandlerErrorEvent(NamedTuple):
     handler: HandlerInfo
     topic: str | None = None
     error: BaseException | None = None
-    error_code: str | None = None
+    error_code: str = ""
     error_message: str | None = None
     outcome: Literal["error", "timeout"] = "error"
 
@@ -138,8 +138,15 @@ class HookPoint(Generic[E]):
         self._listeners: list[Listener[E]] = []
 
     def subscribe(self, listener: Listener[E]) -> Listener[E]:
-        """Register *listener* for this hook point. Returns the listener."""
+        """
+        Register a listener for this hook point.
 
+        Args:
+            listener: Callable to invoke when the hook is emitted.
+
+        Returns:
+            The registered listener.
+        """
         if listener not in self._listeners:
             self._listeners.append(listener)
         return listener
@@ -147,23 +154,39 @@ class HookPoint(Generic[E]):
     __iadd__ = subscribe
 
     def unsubscribe(self, listener: Listener[E]) -> None:
-        """Remove *listener* from this hook point (no-op if not registered)."""
+        """
+        Remove a listener from this hook point.
 
+        Args:
+            listener: Callable to remove (no-op if not registered).
+        """
         try:
             self._listeners.remove(listener)
         except ValueError:
             pass
 
     def __call__(self, listener: Listener[E]) -> Listener[E]:
-        """Allow usage as a decorator."""
+        """
+        Register a listener using decorator syntax.
+
+        Args:
+            listener: Callable to register.
+
+        Returns:
+            The registered listener.
+        """
         return self.subscribe(listener)
 
     def __bool__(self) -> bool:
         return bool(self._listeners)
 
     async def emit(self, event: E) -> None:
-        """Emit *event* to all registered listeners concurrently."""
+        """
+        Emit an event to all registered listeners concurrently.
 
+        Args:
+            event: Event payload to pass to listeners.
+        """
         if not self._listeners:
             return
 
@@ -184,31 +207,76 @@ class AppHooks:
     """Base class for app-level hook observers. Override only needed methods."""
 
     async def on_consume_start(self, event: ConsumeStartEvent) -> None:
-        """Called when consuming starts for a queue."""
+        """
+        Called when consuming starts for a queue.
+
+        Args:
+            event: Consume-start event payload.
+        """
 
     async def on_consume_stop(self, event: ConsumeStopEvent) -> None:
-        """Called when consuming stops or a subscription is removed."""
+        """
+        Called when consuming stops or a subscription is removed.
+
+        Args:
+            event: Consume-stop event payload.
+        """
 
     async def on_request_published(self, event: RequestPublishedEvent) -> None:
-        """Called after a client-side request publish/send attempt completes."""
+        """
+        Called after a client-side request publish/send attempt completes.
+
+        Args:
+            event: Request-published event payload.
+        """
 
     async def on_response_received(self, event: ResponseReceivedEvent) -> None:
-        """Called after a client-side RPC response/outcome is received."""
+        """
+        Called after a client-side RPC response/outcome is received.
+
+        Args:
+            event: Response-received event payload.
+        """
 
     async def on_request_received(self, event: RequestReceivedEvent) -> None:
-        """Called after an incoming request is deserialized."""
+        """
+        Called after an incoming request is deserialized.
+
+        Args:
+            event: Request-received event payload.
+        """
 
     async def before_handler(self, event: BeforeHandlerEvent) -> None:
-        """Called before a handler is executed."""
+        """
+        Called before a handler is executed.
+
+        Args:
+            event: Before-handler event payload.
+        """
 
     async def after_handler(self, event: AfterHandlerEvent) -> None:
-        """Called after a handler completes successfully."""
+        """
+        Called after a handler completes successfully.
+
+        Args:
+            event: After-handler event payload.
+        """
 
     async def on_handler_error(self, event: HandlerErrorEvent) -> None:
-        """Called when a handler fails or times out."""
+        """
+        Called when a handler fails or times out.
+
+        Args:
+            event: Handler-error event payload.
+        """
 
     async def on_message_dropped(self, event: MessageDroppedEvent) -> None:
-        """Called when a message is dropped without handler execution."""
+        """
+        Called when a message is dropped without handler execution.
+
+        Args:
+            event: Message-dropped event payload.
+        """
 
 
 HOOK_NAMES = (
@@ -244,11 +312,22 @@ class HookRegistry:
         return getattr(self, name)
 
     async def emit(self, name: str, event: Any) -> None:
-        """Emit *event* to the hook point named *name*."""
+        """
+        Emit an event to a named hook point.
+
+        Args:
+            name: Hook point name.
+            event: Event payload to emit.
+        """
         await self._point(name).emit(event)
 
     def add_hooks(self, hooks: AppHooks) -> None:
-        """Register all non-default hook methods of *hooks*."""
+        """
+        Register all non-default hook methods of an observer.
+
+        Args:
+            hooks: Hook observer instance providing hook callbacks.
+        """
         key = id(hooks)
         if key in self._hook_objects:
             return
@@ -264,7 +343,12 @@ class HookRegistry:
             self._hook_objects[key] = bound
 
     def remove_hooks(self, hooks: AppHooks) -> None:
-        """Unregister all hook methods previously registered from *hooks*."""
+        """
+        Unregister all hook methods previously registered from an observer.
+
+        Args:
+            hooks: Hook observer instance to remove.
+        """
         key = id(hooks)
         bound = self._hook_objects.pop(key, None)
         if bound is None:

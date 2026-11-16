@@ -1,56 +1,56 @@
-# Local backend
+# LocalBackend
 
-`LocalBackend` is an in-process backend that requires no external broker. It runs handlers within the current process and is useful for trying `linkr` locally.
-
-```python
-from linkr import App, LocalBackend
-
-backend = LocalBackend()
-app = App("orders", backend=backend)
-```
-
-## Characteristics
-
-- **Transport:** in-process async delivery (no network, no persistence).
-- **RPC:** competing consumers on a queue (round-robin); `backend.request(...)` schedules handler execution and returns a `Future` completed with the handler response.
-- **Tasks:** competing consumers on a queue (round-robin). If no task consumer is registered, the task is dropped with a warning.
-- **Events:** fan-out to every registered event consumer whose topic pattern matches. Events are dispatched concurrently and each subscriber receives a copy of the message.
-- **State:** consumer registries are class-level (process-wide). Use `LocalBackend.reset()` in tests to clear state.
-- **Queue options:** `consume_rpc` / `consume_task` accept backend-specific queue options for API compatibility but ignore them (in-process transport has no broker queue/QoS settings). Event consumers are not configured via app-level options.
-
-## Key API
-
-```python
-LocalBackend(name: str | None = None)
-```
-
-- `consume_rpc(queue, handler, *, options=None)` / `consume_task(queue, handler, *, options=None)` register competing consumers. `options` is ignored.
-- `consume_event(queue, topics, handler)` registers an event consumer for topic patterns on a queue.
-- `stop_consume_rpc(queue=None)`, `stop_consume_tasks(queue=None)`, `stop_consume_events(queue=None, topic=None)` stop/unregister consumers owned by the backend instance.
-- `request(queue, message, *, context=None) -> asyncio.Future[Message]` returns after publish/registration.
-  - `send(queue, message, *, context=None)` delivers to one task consumer (or warns if none).
-  - `emit(topic, message, *, context=None)` delivers to all matching subscribers.
-- `LocalBackend.reset()` clears process-wide consumer registries and round-robin state.
+`LocalBackend` is an in-process backend intended for development, testing, and examples. It requires no external broker and runs handlers within the same process event loop.
 
 ## Usage
 
 ```python
 from linkr import App, LocalBackend
 
-async def main() -> None:
-    backend = LocalBackend()
-    app = App("demo", backend=backend)
-
-    @app.method("ping")
-    def ping() -> str:
-        return "pong"
-
-    async with app:
-        await app.consume()
-        assert await app.call("demo.ping", (), {}) == "pong"
+backend = LocalBackend()
+app = App("app", backend=backend)
 ```
 
-## Notes
+You can also construct and pass it inline: `App("app", backend=LocalBackend())`.
 
-- Call `LocalBackend.reset()` when you need to clear process-wide consumer registries and round-robin state between runs.
-- Behavior such as delivery without consumers and error propagation is local/in-process and differs from broker backends; validate critical semantics against the target production backend.
+## Characteristics
+
+- **No external dependencies/services:** everything runs in-memory in the current process.
+- **RPC:** single consumer per logical queue (the registered handler); request/response correlated via futures.
+- **Tasks:** competing consumers per task queue — when multiple consumers are registered for the same queue, tasks are distributed round-robin.
+- **Events:** fan-out to all registered consumers whose topic patterns match; each server instance has its own event queue/consumer.
+- **Stop semantics:** supports `stop_consume_rpc(queue=None)`, `stop_consume_tasks(queue=None)`, and `stop_consume_events(queue=None, topic=None)` for per-queue/topic control (used by `Server.stop_consume(...)`).
+- **Reset:** `LocalBackend.reset()` clears global in-process registries (useful in tests).
+
+## Limitations
+
+- Not suitable for multi-process or distributed deployments.
+- No persistence, durability, or broker-level guarantees.
+- Delivery/ordering behavior is in-process and simpler than broker backends.
+
+## Example
+
+```python
+import asyncio
+
+from linkr import App, LocalBackend
+
+
+async def main() -> None:
+    backend = LocalBackend()
+
+    async with App("server", backend=backend) as server_app:
+        srv = server_app.server()
+
+        @srv.method("ping")
+        def ping() -> str:
+            return "pong"
+
+        await srv.consume(mode="rpc")
+
+        async with App("client", backend=backend) as client_app:
+            print(await client_app.client.call("server.ping", (), {}))
+
+
+asyncio.run(main())
+```

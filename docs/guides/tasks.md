@@ -1,92 +1,64 @@
 # Tasks
 
-Tasks are fire-and-forget jobs: one consumer handles each task, and the caller does not receive a result.
+Tasks are fire-and-forget handlers: no result is returned to the sender. They run on a `Server` and are sent via `app.client.send(...)`.
 
-## Registering tasks
+## Registering handlers
 
 ```python
 from linkr import App, LocalBackend
 
 app = App("worker", backend=LocalBackend())
+email = app.server("email")
 
-@app.task("email.send")
+@email.task("send")
 async def send_email(user_id: int, template: str = "welcome") -> None:
-    ...
+    ...  # perform work
 ```
 
-- `@app.task(name, **options)` registers a task handler.
-- Dotted names control queue routing (e.g. `email.send` → queue `<app>.email`, task name `send`).
-- `options` can include `validate_types=True|False`.
+- `@server.task(name, **options)` registers a task handler with a local leaf name on the server's queue.
+- Supported handler options (see [Configuration](../reference/configuration.md)): e.g. `validate_types`.
+- Sync and async handlers are supported.
 
-## Sending tasks
+## Sending
 
 ```python
-await app.consume()
+app = App("worker", backend=LocalBackend())
+email = app.server("email")
 
-await app.send("worker.email.send", (), {"user_id": 42})
-await app.send("worker.email.send", (42,), {"template": "welcome"})
+@email.task("send")
+async def send_email(user_id: int, template: str = "welcome") -> None:
+    ...  # perform work
+
+await app.init()
+await email.consume(mode="task")
+
+await app.client.send("worker.email.send", (), {"user_id": 42})
+await app.client.send("worker.email.send", (42,), {})
 ```
 
-Signature:
+Signature: `app.client.send(task, args: tuple, kwds: dict, *, timeout=None, ttl=None, serializer=None, request_id=None, context=None)`.
 
-```python
-await app.send(
-    task: str,
-    args: tuple[Any, ...],
-    kwds: dict[str, Any],
-    *,
-    request_id: UUID | None = None,
-    timeout: float | None = None,
-    ttl: float | None = None,
-    serializer: str | None = None,
-    context: dict[str, Any] | None = None,
-) -> None
-```
-
-- Returns `None`. Completion of `send` means the client-side publish completed (subject to backend semantics), not that the task ran successfully.
-- `task` should be the fully qualified path targeting the consumer queue.
+- `task` is the queue-qualified path; the last segment is dispatched as the handler leaf.
+- `send` returns `None` (no response from the handler).
 
 ## Delivery semantics
 
-- **Competing consumers:** if multiple consumers listen on the same task queue, each task is delivered to exactly one of them.
-- **No caller response:** task handlers do not return a value to the sender.
-- **Failures:** handler exceptions and execution timeouts are logged; argument validation failures are logged and the handler is not invoked. No error is propagated to the sender.
-- **No consumer available:** behavior depends on the backend. For example, `LocalBackend` logs a warning when no task consumer is registered for the queue; broker-backed backends may queue messages until a consumer appears (per broker/queue configuration).
+- **Competing consumers:** if multiple consumers listen on the same task queue, each task is handled by exactly one of them (backend-dependent load distribution).
+- If no consumer is available for the queue, behavior depends on the backend (e.g. in-memory backends may drop/no-op; broker backends may queue according to broker semantics).
 
-## Observability
+## Errors and validation
 
-Because tasks have no response channel, use [hooks](hooks.md) and logging for visibility:
+- Handler exceptions are logged on the server side (no client response). Custom exception handlers registered via `@app.exception_handler(...)` do not produce a client reply for tasks.
+- Validation failures (when `validate_types` is enabled) prevent handler execution and are logged/dropped according to hooks.
+- See [Error handling](error-handling.md).
 
-- Client: `on_request_published`
-- Server: `on_request_received`, `before_handler`, `after_handler`, `on_handler_error`, `on_message_dropped`
-
-## Example: competing workers
+## Consuming
 
 ```python
-import asyncio
-from linkr import App, LocalBackend
+server = app.server()
 
-backend = LocalBackend()
-worker_a = App("worker", backend=backend)
-worker_b = App("worker", backend=backend)
-client = App("client", backend=backend)
-
-@worker_a.task("job.run")
-def run_a(n: int) -> None:
-    print("A", n)
-
-@worker_b.task("job.run")
-def run_b(n: int) -> None:
-    print("B", n)
-
-async def main() -> None:
-    async with worker_a, worker_b, client:
-        await worker_a.consume()
-        await worker_b.consume()
-        for i in range(4):
-            await client.send("worker.job.run", (i,), {})
-
-asyncio.run(main())
+await server.consume(mode="task")      # start task consuming for this server
+await server.stop_consume(mode="task") # pause task consuming (resumable)
 ```
 
-(Distribution across workers depends on backend/consumer selection.)
+Consuming is controlled per server and mode (no global app consume/stop).

@@ -5,9 +5,15 @@ import re
 
 def topic_to_regex(pattern: str) -> re.Pattern[str]:
     """
-    Convert an event topic pattern into a regular expression.
+    Convert an event topic pattern into a compiled regular expression.
 
-    ``*`` matches exactly one segment, ``#`` matches zero or more segments.
+    ``*`` matches exactly one segment and ``#`` matches zero or more segments.
+
+    Args:
+        pattern: Topic pattern string.
+
+    Returns:
+        Compiled regular expression matching the pattern.
     """
     parts = pattern.split(".")
 

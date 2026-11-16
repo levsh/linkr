@@ -126,12 +126,10 @@ class TestJsonRpcSerializer:
         assert restored.data["args"] == ()
         assert restored.data["kwds"] == {"name": "world"}
 
-    def test_roundtrip_both(self, serializer: JsonRpcSerializer):
+    def test_rejects_mixed_args_and_kwds(self, serializer: JsonRpcSerializer):
         original = make_request("rpc", "mixed", (1,), {"x": 2})
-        restored = serializer.loads_request(serializer.dumps_request(original))
-
-        assert restored.data["args"] == (1,)
-        assert restored.data["kwds"] == {"x": 2}
+        with pytest.raises(ValueError, match="mixed positional and keyword arguments"):
+            serializer.dumps_request(original)
 
     def test_roundtrip_no_params(self, serializer: JsonRpcSerializer):
         original = make_request("rpc", "ping")

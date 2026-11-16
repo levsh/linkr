@@ -21,23 +21,55 @@ class Serializer(ABC):
     @property
     @abstractmethod
     def name(self) -> str:
-        """Human-readable format name (e.g. ``"linkr1.0"``, ``"jsonrpc2.0"``)."""
+        """Return the human-readable serializer format name."""
 
     @abstractmethod
     def dumps_request(self, request: Request) -> Message:
-        """Serialize a :class:`Request` into a message."""
+        """
+        Serialize a request into a wire message.
+
+        Args:
+            request: Request object to serialize.
+
+        Returns:
+            Serialized wire message.
+        """
 
     @abstractmethod
     def loads_request(self, message: Message) -> Request:
-        """Deserialize a :class:`Message` into a request."""
+        """
+        Deserialize a wire message into a request.
+
+        Args:
+            message: Wire message to deserialize.
+
+        Returns:
+            Deserialized request object.
+        """
 
     @abstractmethod
     def dumps_response(self, response: Response) -> Message:
-        """Serialize a :class:`Response` into a raw message."""
+        """
+        Serialize a response into a wire message.
+
+        Args:
+            response: Response object to serialize.
+
+        Returns:
+            Serialized wire message.
+        """
 
     @abstractmethod
     def loads_response(self, message: Message) -> Response:
-        """Deserialize a :class:`Message` into a response."""
+        """
+        Deserialize a wire message into a response.
+
+        Args:
+            message: Wire message to deserialize.
+
+        Returns:
+            Deserialized response object.
+        """
 
 
 class JsonSerializer(Serializer):
@@ -51,25 +83,57 @@ class JsonSerializer(Serializer):
 
     @property
     def name(self) -> str:
-        """Human-readable format name (``"linkr1.0"``)."""
+        """Return the serializer format name (``"linkr1.0"``)."""
         return "linkr1.0"
 
     def dumps_request(self, request: Request) -> Message:
-        """Serialize a :class:`Request` into a message."""
+        """
+        Serialize a request into a wire message.
+
+        Args:
+            request: Request object to serialize.
+
+        Returns:
+            Serialized wire message.
+        """
         data = request.model_dump_json().encode()
         return Message(data=data, headers=self._headers)
 
     def loads_request(self, message: Message) -> Request:
-        """Deserialize a :class:`Message` into a request."""
+        """
+        Deserialize a wire message into a request.
+
+        Args:
+            message: Wire message to deserialize.
+
+        Returns:
+            Deserialized request object.
+        """
         return Request.model_validate_json(message.data)
 
     def dumps_response(self, response: Response) -> Message:
-        """Serialize a :class:`Response` into a raw message."""
+        """
+        Serialize a response into a wire message.
+
+        Args:
+            response: Response object to serialize.
+
+        Returns:
+            Serialized wire message.
+        """
         data = response.model_dump_json().encode()
         return Message(data=data, headers=self._headers)
 
     def loads_response(self, message: Message) -> Response:
-        """Deserialize a :class:`Message` into a response."""
+        """
+        Deserialize a wire message into a response.
+
+        Args:
+            message: Wire message to deserialize.
+
+        Returns:
+            Deserialized response object.
+        """
         return Response.model_validate_json(message.data)
 
 
@@ -101,11 +165,22 @@ class JsonRpcSerializer(Serializer):
 
     @property
     def name(self) -> str:
-        """Human-readable format name (``"jsonrpc2.0"``)."""
+        """Return the serializer format name (``"jsonrpc2.0"``)."""
         return "jsonrpc2.0"
 
     def dumps_request(self, request: Request) -> Message:
-        """Serialize an RPC :class:`Request` into a JSON-RPC 2.0 message."""
+        """
+        Serialize an RPC request into a JSON-RPC 2.0 wire message.
+
+        Args:
+            request: RPC request object to serialize.
+
+        Returns:
+            Serialized wire message.
+
+        Raises:
+            ValueError: If *request* is not an RPC request.
+        """
         if request.type != "rpc":
             raise ValueError("JsonRpcSerializer supports only RPC requests")
 
@@ -117,12 +192,12 @@ class JsonRpcSerializer(Serializer):
             "id": str(request.id),
         }
 
-        args = data["args"]
-        kwds = data["kwds"]
+        args = data.get("args") or ()
+        kwds = data.get("kwds") or {}
 
         if args and kwds:
-            obj["params"] = {"args": list(args), "kwds": kwds}
-        elif args:
+            raise ValueError("JsonRpcSerializer does not support mixed positional and keyword arguments")
+        if args:
             obj["params"] = list(args)
         elif kwds:
             obj["params"] = dict(kwds)
@@ -134,7 +209,18 @@ class JsonRpcSerializer(Serializer):
         return Message(data=payload, headers=self._headers)
 
     def loads_request(self, message: Message) -> Request:
-        """Deserialize a :class:`Message` into a JSON-RPC 2.0 request."""
+        """
+        Deserialize a wire message into a JSON-RPC 2.0 request.
+
+        Args:
+            message: Wire message to deserialize.
+
+        Returns:
+            Deserialized request object.
+
+        Raises:
+            ValueError: If the message is not a valid JSON-RPC 2.0 request.
+        """
         obj: dict[str, Any] = json.loads(message.data)
 
         if not isinstance(obj, dict) or obj.get("jsonrpc") != "2.0":
@@ -149,12 +235,8 @@ class JsonRpcSerializer(Serializer):
             args = tuple(params)
             kwds = {}
         elif isinstance(params, dict):
-            if "args" in params and "kwds" in params:
-                args = tuple(params["args"])
-                kwds = dict(params["kwds"])
-            else:
-                args = ()
-                kwds = dict(params)
+            args = ()
+            kwds = dict(params)
         else:
             args = ()
             kwds = {}
@@ -174,7 +256,15 @@ class JsonRpcSerializer(Serializer):
         )
 
     def dumps_response(self, response: Response) -> Message:
-        """Serialize a :class:`Response` into a JSON-RPC 2.0 message."""
+        """
+        Serialize a response into a JSON-RPC 2.0 wire message.
+
+        Args:
+            response: Response object to serialize.
+
+        Returns:
+            Serialized wire message.
+        """
         obj: dict[str, Any] = {
             "jsonrpc": "2.0",
             "id": str(response.id),
@@ -209,7 +299,18 @@ class JsonRpcSerializer(Serializer):
         return Message(data=data, headers=self._headers)
 
     def loads_response(self, message: Message) -> Response:
-        """Deserialize a :class:`Message` into a JSON-RPC 2.0 response."""
+        """
+        Deserialize a wire message into a JSON-RPC 2.0 response.
+
+        Args:
+            message: Wire message to deserialize.
+
+        Returns:
+            Deserialized response object.
+
+        Raises:
+            ValueError: If the message is not a valid JSON-RPC 2.0 response.
+        """
         obj: dict[str, Any] = json.loads(message.data)
 
         if not isinstance(obj, dict) or obj.get("jsonrpc") != "2.0":

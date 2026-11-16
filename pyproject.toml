@@ -24,16 +24,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-rabbitmq = ["aio-pika>=9.0"]
+rabbitmq = [
+    "aio-pika>=9.0",
+]
 docs = ["zensical"]
 
 [project.urls]
 Homepage = "https://github.com/levsh/linkr"
 Repository = "https://github.com/levsh/linkr"
 BugTracker = "https://github.com/levsh/linkr/issues"
-
-[tool.poetry.dependencies]
-python = ">=3.11,<4.0"
 
 [tool.poetry.group.test.dependencies]
 docker = "*"
@@ -97,12 +96,14 @@ disable = [
     "missing-class-docstring",
     "missing-function-docstring",
     "broad-exception-caught",
+    "duplicate-code",
     "too-few-public-methods",
     "too-many-instance-attributes",
     "too-many-arguments",
     "too-many-branches",
     "too-many-lines",
     "too-many-locals",
+    "too-many-positional-arguments",
     "too-many-public-methods",
     "too-many-return-statements",
     "too-many-statements",

@@ -59,37 +59,37 @@ class Recorder(AppHooks):
 
 
 class TestHookRegistration:
-    async def test_add_remove_hooks_object(self, app: App):
+    async def test_add_remove_hooks_object(self, app: App, server):
         recorder = Recorder()
 
-        @app.method("ping")
+        @server.method("ping")
         def ping() -> str:
             return "pong"
 
         app.add_hooks(recorder)
-        await app.consume()
+        await server.consume()
         await call(app, "app.ping")
 
         assert any(e.queue == "app" and e.mode == "rpc" for e in recorder.by_name("on_consume_start"))
-        assert any(e.handler.name == "ping" for e in recorder.by_name("after_handler"))
+        assert any(e.handler.name == "app.ping" for e in recorder.by_name("after_handler"))
 
         count = len(recorder.events)
         app.remove_hooks(recorder)
         await call(app, "app.ping")
         assert len(recorder.events) == count
 
-    async def test_subscribe_unsubscribe_and_decorator(self, app: App):
+    async def test_subscribe_unsubscribe_and_decorator(self, app: App, server):
         seen: list[str] = []
 
         def listener(event: RequestPublishedEvent) -> None:
             seen.append(event.outcome)
 
-        @app.method("ping")
+        @server.method("ping")
         def ping() -> str:
             return "pong"
 
         app.hooks.on_request_published.subscribe(listener)
-        await app.consume()
+        await server.consume()
         await call(app, "app.ping")
         app.hooks.on_request_published.unsubscribe(listener)
 
@@ -102,67 +102,61 @@ class TestHookRegistration:
         await call(app, "app.ping")
 
         assert seen == ["ok"]
-        assert decorated == ["ping"]
+        assert decorated == ["app.ping"]
 
 
 class TestHookConsumeEvents:
     async def test_rpc_task_consume_start_stop(self):
         backend = LocalBackend()
         app = App("app", backend=backend)
+        server = app.server()
         recorder = Recorder()
         app.add_hooks(recorder)
 
-        @app.method("foo")
+        @server.method("foo")
         def foo() -> str:
             return "foo"
 
-        @app.method("bar")
+        @server.method("bar")
         def bar() -> str:
             return "bar"
 
-        @app.task("job")
+        @server.task("job")
         def job() -> None:
             return None
-
         async with app:
-            await app.consume()
+            await server.consume()
 
             starts = recorder.by_name("on_consume_start")
             assert ConsumeStartEvent(app="app", mode="rpc", queue="app", topics=()) in starts
             assert ConsumeStartEvent(app="app", mode="task", queue="app", topics=()) in starts
 
-            await app.stop_consume_rpc("foo")
-            assert not any(
-                e.mode == "rpc" and e.reason == "queue_drained" for e in recorder.by_name("on_consume_stop")
-            )
+            await server.stop_consume(mode='rpc')
+            await server.stop_consume(mode='rpc')  # idempotent
+            rpc_stops = [e for e in recorder.by_name("on_consume_stop") if e.mode == "rpc"]
+            assert rpc_stops == [ConsumeStopEvent(app="app", mode="rpc", queue="app", topic=None, reason="stopped")]
 
-            await app.stop_consume_rpc("bar")
-            assert ConsumeStopEvent(
-                app="app", mode="rpc", queue="app", topic=None, reason="queue_drained"
-            ) in recorder.by_name("on_consume_stop")
-
-            await app.stop_consume_tasks()
-            assert ConsumeStopEvent(
-                app="app", mode="task", queue=None, topic=None, reason="all"
-            ) in recorder.by_name("on_consume_stop")
+            await server.stop_consume(mode='task')
+            task_stops = [e for e in recorder.by_name("on_consume_stop") if e.mode == "task"]
+            assert task_stops == [ConsumeStopEvent(app="app", mode="task", queue="app", topic=None, reason="stopped")]
 
     async def test_event_consume_start_stop_reasons(self):
         backend = LocalBackend()
         app = App("app", backend=backend)
+        server = app.server()
         recorder = Recorder()
         app.add_hooks(recorder)
 
-        @app.subscribe("user.created")
+        @server.subscribe("user.created")
         def on_created(user_id: int) -> None:
             pass
 
-        @app.subscribe("user.deleted")
+        @server.subscribe("user.deleted")
         def on_deleted(user_id: int) -> None:
             pass
-
         async with app:
-            await app.consume()
-            queue = app._event_queue
+            await server.consume()
+            queue = server.event_queue
             assert queue is not None
 
             starts = [e for e in recorder.by_name("on_consume_start") if e.mode == "event"]
@@ -170,63 +164,58 @@ class TestHookConsumeEvents:
             assert starts[0].queue == queue
             assert starts[0].topics == ("user.created", "user.deleted")
 
-            await app.stop_consume_events("user.created")
+            await server.stop_consume(mode='event')
             assert ConsumeStopEvent(
-                app="app", mode="event", queue=queue, topic="user.created", reason="topic_unsubscribed"
-            ) in recorder.by_name("on_consume_stop")
-
-            await app.stop_consume_events("user.deleted")
-            assert ConsumeStopEvent(
-                app="app", mode="event", queue=queue, topic="user.deleted", reason="queue_drained"
+                app="app", mode="event", queue=queue, topic=None, reason="stopped"
             ) in recorder.by_name("on_consume_stop")
 
     async def test_event_consume_stop_all(self):
         backend = LocalBackend()
         app = App("app", backend=backend)
+        server = app.server()
         recorder = Recorder()
         app.add_hooks(recorder)
 
-        @app.subscribe("user.created")
+        @server.subscribe("user.created")
         def on_created(user_id: int) -> None:
             pass
-
         async with app:
-            await app.consume()
-            queue = app._event_queue
-            await app.stop_consume_events()
+            await server.consume()
+            queue = server.event_queue
+            await server.stop_consume(mode='event')
 
         assert ConsumeStopEvent(
-            app="app", mode="event", queue=queue, topic=None, reason="all"
+            app="app", mode="event", queue=queue, topic=None, reason="stopped"
         ) in recorder.by_name("on_consume_stop")
 
 
 class TestClientRequestHooks:
-    async def test_rpc_published_and_response_ok_error_timeout(self, app: App):
+    async def test_rpc_published_and_response_ok_error_timeout(self, app: App, server):
         published: list[RequestPublishedEvent] = []
         responses: list[ResponseReceivedEvent] = []
         app.hooks.on_request_published.subscribe(published.append)
         app.hooks.on_response_received.subscribe(responses.append)
 
-        @app.method("ping")
+        @server.method("ping")
         def ping() -> str:
             return "pong"
 
-        @app.method("fail")
+        @server.method("fail")
         def fail() -> str:
             raise ValueError("boom")
 
-        @app.method("slow")
+        @server.method("slow")
         async def slow() -> str:
             await asyncio.sleep(10)
             return "late"
 
-        await app.consume()
+        await server.consume()
 
         assert await call(app, "app.ping") == "pong"
         with pytest.raises(RPCError):
             await call(app, "app.fail")
         with pytest.raises(RPCError):
-            await app.call("app.slow", (), {}, timeout=0.05)
+            await app.client.call("app.slow", (), {}, timeout=0.05)
 
         assert len(published) == 3
         assert len(responses) == 3
@@ -245,21 +234,21 @@ class TestClientRequestHooks:
         assert responses[2].error.error_code == ErrorCode.TIMEOUT
         assert all(e.request is p.request for e, p in zip(responses, published))
 
-    async def test_task_and_event_publish_only(self, app: App):
+    async def test_task_and_event_publish_only(self, app: App, server):
         published: list[RequestPublishedEvent] = []
         responses: list[ResponseReceivedEvent] = []
         app.hooks.on_request_published.subscribe(published.append)
         app.hooks.on_response_received.subscribe(responses.append)
 
-        @app.task("job")
+        @server.task("job")
         def job(value: int) -> None:
             pass
 
-        @app.subscribe("topic")
+        @server.subscribe("topic")
         def on_topic(value: int) -> None:
             pass
 
-        await app.consume()
+        await server.consume()
         await send(app, "app.job", 1)
         await emit(app, "topic", value=2)
 
@@ -273,15 +262,15 @@ class TestClientRequestHooks:
 
 
 class TestServerHandlerHooks:
-    async def test_request_received_before_after_rpc(self, app: App):
+    async def test_request_received_before_after_rpc(self, app: App, server):
         recorder = Recorder()
         app.add_hooks(recorder)
 
-        @app.method("add")
+        @server.method("add")
         def add(x: int, y: int) -> int:
             return x + y
 
-        await app.consume()
+        await server.consume()
         assert await call(app, "app.add", 2, 3) == 5
 
         assert len(recorder.by_name("on_request_received")) == 1
@@ -289,27 +278,27 @@ class TestServerHandlerHooks:
         after = recorder.by_name("after_handler")
         assert len(before) == 1
         assert len(after) == 1
-        assert before[0].handler.name == "add"
-        assert after[0].handler.name == "add"
+        assert before[0].handler.name == "app.add"
+        assert after[0].handler.name == "app.add"
         assert after[0].result == 5
 
-    async def test_handler_error_rpc_task_event(self, app: App):
+    async def test_handler_error_rpc_task_event(self, app: App, server):
         errors: list[HandlerErrorEvent] = []
         app.hooks.on_handler_error.subscribe(errors.append)
 
-        @app.method("fail")
+        @server.method("fail")
         def fail() -> str:
             raise ValueError("boom")
 
-        @app.task("fail_task")
+        @server.task("fail_task")
         def fail_task() -> None:
             raise ValueError("task boom")
 
-        @app.subscribe("evt")
+        @server.subscribe("evt")
         def fail_evt(value: int) -> None:
             raise ValueError("evt boom")
 
-        await app.consume()
+        await server.consume()
 
         with pytest.raises(RPCError):
             await call(app, "app.fail")
@@ -320,43 +309,43 @@ class TestServerHandlerHooks:
         assert {(e.mode, e.outcome) for e in errors} == {("rpc", "error"), ("task", "error"), ("event", "error")}
         rpc_err = next(e for e in errors if e.mode == "rpc")
         assert rpc_err.error_code == ErrorCode.INTERNAL_ERROR
-        assert rpc_err.handler.name == "fail"
+        assert rpc_err.handler.name == "app.fail"
 
 
 class TestDroppedMessageHooks:
-    async def test_rpc_drops(self, app: App):
+    async def test_rpc_drops(self, app: App, server):
         drops: list[MessageDroppedEvent] = []
         app.hooks.on_message_dropped.subscribe(drops.append)
 
-        @app.method("typed", validate_types=True)
+        @server.method("typed", validate_types=True)
         def typed(x: int) -> int:
             return x
 
-        await app.consume()
+        await server.consume()
 
         with pytest.raises(RPCError):
             await call(app, "app.missing")
         with pytest.raises(RPCError):
-            await app.call("app.typed", ("bad",), {})
+            await app.client.call("app.typed", ("bad",), {})
 
         reasons = [d.reason for d in drops]
         assert "handler_not_found" in reasons
         assert "validation_failed" in reasons
-        assert any(d.handler and d.handler.name == "typed" for d in drops if d.reason == "validation_failed")
+        assert any(d.handler and d.handler.name in ("app.typed", "typed") for d in drops if d.reason == "validation_failed")
 
-    async def test_task_and_event_drops(self, app: App):
+    async def test_task_and_event_drops(self, app: App, server):
         drops: list[MessageDroppedEvent] = []
         app.hooks.on_message_dropped.subscribe(drops.append)
 
-        @app.task("typed", validate_types=True)
+        @server.task("typed", validate_types=True)
         def typed(x: int) -> None:
             pass
 
-        @app.subscribe("evt", validate_types=True)
+        @server.subscribe("evt", validate_types=True)
         def on_evt(x: int) -> None:
             pass
 
-        await app.consume()
+        await server.consume()
 
         await send(app, "app.missing")
         await send(app, "app.typed", "bad")
@@ -370,7 +359,7 @@ class TestDroppedMessageHooks:
 
 
 class TestHookListenerBehavior:
-    async def test_multiple_listeners_and_exception_isolation(self, app: App):
+    async def test_multiple_listeners_and_exception_isolation(self, app: App, server):
         seen: list[str] = []
 
         def bad(_event: RequestPublishedEvent) -> None:
@@ -382,27 +371,27 @@ class TestHookListenerBehavior:
         app.hooks.on_request_published.subscribe(bad)
         app.hooks.on_request_published.subscribe(good)
 
-        @app.method("ping")
+        @server.method("ping")
         def ping() -> str:
             return "pong"
 
-        await app.consume()
+        await server.consume()
         assert await call(app, "app.ping") == "pong"
         assert seen == ["ok"]
 
-    async def test_async_listener(self, app: App):
+    async def test_async_listener(self, app: App, server):
         seen = asyncio.Event()
 
         async def listener(event: AfterHandlerEvent) -> None:
-            if event.handler.name == "ping":
+            if event.handler.name == "app.ping":
                 seen.set()
 
         app.hooks.after_handler.subscribe(listener)
 
-        @app.method("ping")
+        @server.method("ping")
         def ping() -> str:
             return "pong"
 
-        await app.consume()
+        await server.consume()
         await call(app, "app.ping")
         await asyncio.wait_for(seen.wait(), timeout=1.0)

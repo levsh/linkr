@@ -68,13 +68,13 @@ Metadata for registered handlers (name, request type, function, signature, optio
 
 ## Client parameters and defaults
 
-`App` accepts default timing parameters:
+`App` accepts default timing parameters per delivery mode:
 
-- `timeout`: default RPC timeout (seconds) for outgoing requests (sent in request headers)
-- `ttl`: default message TTL (seconds) for outgoing requests
-- `rttl`: default response TTL (seconds) for outgoing RPC requests
+- `rpc_timeout`, `rpc_ttl`, `rpc_rttl`: defaults for RPC handler timeout, request TTL, and response TTL (seconds)
+- `task_timeout`, `task_ttl`: defaults for task handler timeout and request TTL (seconds)
+- `event_ttl`: default event TTL (seconds)
 
-Built-in defaults used for RPC when not set: `RPC_TIMEOUT = 300.0`, `RPC_TTL = 300.0`. The client waits for an RPC response up to `timeout + ttl` seconds.
+Built-in class defaults: `RPC_TIMEOUT = 60.0`, `RPC_TTL = 60.0`, `RPC_RTTL = 600.0`, `TASK_TIMEOUT = 3600.0`, `TASK_TTL = 3600.0`, `EVENT_TTL = 3600.0`. For RPC, the client waits for a response up to `timeout + ttl` seconds.
 
 Per-call overrides are available on `call`/`send`/`emit` (where applicable): `request_id`, `timeout`, `ttl`, `rttl` (RPC). See [Client API](../guides/client-api.md).
 

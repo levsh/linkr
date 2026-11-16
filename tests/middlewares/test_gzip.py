@@ -138,47 +138,41 @@ class TestGzipMiddlewareWithApp:
     """Integration tests for GzipMiddleware through the full App pipeline."""
 
     async def test_gzip_roundtrip_small_payload(self):
-        app = App("app", backend=LocalBackend())
-        app.add_middleware(GzipMiddleware())
+        app = App("app", backend=LocalBackend(), middlewares=[GzipMiddleware()])
+        srv = app.server()
         await app.init()
 
-        @app.method("ping")
+        @srv.method("ping")
         def ping() -> str:
             return "pong"
 
-        await app.consume()
-        assert await app.call("app.ping", (), {}) == "pong"
+        await srv.consume()
+        assert await app.client.call("app.ping", (), {}) == "pong"
         await app.close()
 
     async def test_gzip_large_request(self):
-        app = App("app", backend=LocalBackend())
-        app.add_middleware(GzipMiddleware())
+        app = App("app", backend=LocalBackend(), middlewares=[GzipMiddleware()])
+        srv = app.server()
         await app.init()
 
-        @app.method("echo")
+        @srv.method("echo")
         def echo(data: str) -> str:
             return data
 
         large = "x" * 2000
-        await app.consume()
-        assert await app.call("app.echo", (), {"data": large}) == large
+        await srv.consume()
+        assert await app.client.call("app.echo", (), {"data": large}) == large
         await app.close()
 
     async def test_gzip_large_response(self):
-        app = App("app", backend=LocalBackend())
-        app.add_middleware(GzipMiddleware())
+        app = App("app", backend=LocalBackend(), middlewares=[GzipMiddleware()])
+        srv = app.server()
         await app.init()
 
-        @app.method("get_large")
+        @srv.method("get_large")
         def get_large() -> str:
             return "y" * 2000
 
-        await app.consume()
-        assert await app.call("app.get_large", (), {}) == "y" * 2000
+        await srv.consume()
+        assert await app.client.call("app.get_large", (), {}) == "y" * 2000
         await app.close()
-
-    async def test_gzip_add_middleware_appends(self):
-        app = App("app", backend=LocalBackend())
-        assert len(app._wire_mw) == 0
-        app.add_middleware(GzipMiddleware())
-        assert len(app._wire_mw) == 1

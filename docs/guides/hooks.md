@@ -116,15 +116,16 @@ Fields: `app`, `mode`, `queue`, `topics` (tuple of patterns for event mode, else
 
 ### `ConsumeStopEvent` (`on_consume_stop`)
 
-Emitted when consuming stops or a subscription is removed.
+Emitted when consuming stops.
 
 | Reason | Meaning |
 |---|---|
+| `stopped` | Consuming stopped for the server/mode/queue (emitted by `Server.stop_consume`) |
 | `all` | All consumers of the mode stopped |
 | `queue_drained` | Queue consumer stopped because no handlers/subscriptions remain |
 | `topic_unsubscribed` | Only a specific event topic subscription was removed; consumer remains active |
 
-Fields: `app`, `mode`, `queue`, `topic`, `reason`.
+Fields: `app`, `mode`, `queue`, `topic`, `reason` (`ConsumeStopReason`).
 
 ## Example: metrics and tracing hooks
 

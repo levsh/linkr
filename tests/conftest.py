@@ -47,6 +47,11 @@ async def app(local_backend: LocalBackend):
     await instance.close()
 
 
+@pytest.fixture
+async def server(app: App):
+    return app.server()
+
+
 @pytest.fixture(scope="class")
 def container_executor():
     pytest.importorskip("docker")

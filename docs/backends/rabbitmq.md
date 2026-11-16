@@ -1,106 +1,116 @@
-# RabbitMQ backend
+# RabbitMQ backend (`RmqBackend`)
 
-`RmqBackend` provides broker-backed delivery using RabbitMQ via `aio-pika`.
+`RmqBackend` is a RabbitMQ transport for linkr built on `aio-pika`.
 
 ## Installation
+
+Install the RabbitMQ extra:
 
 ```bash
 pip install "linkr[rabbitmq]"
 ```
 
+## Usage
+
 ```python
 from linkr import App
 from linkr.backends.rmq import RmqBackend
 
-backend = RmqBackend(host="localhost", port=5672)
+backend = RmqBackend(
+    host="localhost",
+    port=5672,
+    login="guest",
+    password="guest",
+    virtualhost="/",
+    exchange="linkr",  # single exchange name or per-mode mapping
+)
+
 app = App("orders", backend=backend)
+server = app.server()
+
+@server.method("ping")
+def ping() -> str:
+    return "pong"
+
+await app.init()
+await server.consume(mode="rpc")
 ```
 
 ## Configuration
 
-`RmqBackend` parameters (from implementation):
+`RmqBackend(...)` parameters:
 
-| Parameter | Default | Description |
-|---|---|---|
-| `host` | `"localhost"` | RabbitMQ host |
-| `port` | `5672` | AMQP port |
-| `login` | `"guest"` | Username (used with `PLAIN` auth) |
-| `password` | `"guest"` | Password (used with `PLAIN` auth) |
-| `virtualhost` | `"/"` | Virtual host |
-| `ssl_context` | `None` | Optional `ssl.SSLContext` for TLS connections |
-| `auth_mechanism` | `"PLAIN"` | Authentication mechanism (e.g. `PLAIN`, `EXTERNAL`) |
-| `connection_name` | `None` | Optional AMQP client connection name |
-| `exchange` | `"linkr"` | Exchange name (str for single exchange shared by all modes, or `dict[Mode, str]` for per-mode exchanges) |
-| `exchange_durable` | `True` | Declare exchanges as durable (bool for all modes, or `dict[Mode, bool]` for per-mode) |
-| `queue_options` | `None` | Default `RmqQueueOptions` for RPC/task queues (single object for both, or `dict["rpc"/"task", RmqQueueOptions]` for per-mode) |
-| `heartbeat` | `30` | Connection heartbeat (seconds) |
-| `blocked_connection_timeout` | `30` | Blocked connection timeout (seconds) |
-| `results_queue_prefix` | `None` (`"linkr.res."`) | Prefix for the exclusive RPC callback queue name |
+- `host` (default `"localhost"`), `port` (default `5672`)
+- `login`, `password`, `virtualhost`
+- `ssl_context`: optional `ssl.SSLContext` for TLS connections
+- `auth_mechanism` (default `"PLAIN"`)
+- `connection_name`: optional AMQP client connection name
+- `exchange` (default `"linkr"`):
+  - **Single exchange (default):** `exchange="linkr"` (str) — one topic exchange named `linkr` shared by RPC, tasks, and events. Queues per logical queue: `linkr.rpc.<queue>`, `linkr.tasks.<queue>`, `linkr.events.<queue>`.
+  - **Per-mode exchanges:** `{"rpc": "app.rpc", "task": "app.tasks", "event": "app.events"}` (all keys required) — separate exchange per mode. Exchange types: `rpc=direct`, `task=direct`, `event=topic`. Physical queue names use the same `linkr.<mode>.<queue>` scheme.
+- `exchange_durable` (default `True`): `bool` applied to all exchanges, or per-mode `{"rpc": ..., "task": ..., "event": ...}`.
+- `queue_options` (default `None`): default `RmqQueueOptions` for all modes, or a per-mode mapping for `"rpc"` / `"task"` / `"event"`.
+- `heartbeat` (default `30`): AMQP heartbeat in seconds.
+- `blocked_connection_timeout` (default `30`): AMQP blocked-connection timeout in seconds.
+- `results_queue_prefix` (default `"linkr.res."`): prefix for the per-instance RPC callback (reply) queue name.
 
-## Topology and routing
+## Queue topology
 
-On `init()`, the backend connects and declares exchanges:
+- Logical queues come from server scopes and event queues (e.g. `app`, `app.group`, `app.<instance_id>` or `app.group.<instance_id>` for events).
+- Physical broker queues are namespaced: `linkr.rpc.<queue>`, `linkr.tasks.<queue>`, `linkr.events.<queue>`.
+- Bind/publish routing keys use the logical queue/topic names as expected by linkr.
+- RPC replies are delivered to a per-backend-instance exclusive callback queue (`<results_queue_prefix><id>`), used as `reply_to` with `correlation_id` matching.
 
-- **Single exchange (default):** `exchange="linkr"` (str) — one topic exchange named `linkr` shared by RPC, tasks, and events. Queue per logical queue: `linkr.rpc.<queue>`, `linkr.task.<queue>`, `linkr.event.<queue>`.
-- **Per-mode exchanges:** `exchange={"rpc": "...", "task": "...", "event": "..."}` — separate exchanges for each mode. RPC and tasks use DIRECT type; events use TOPIC type. All three mode keys are required.
-- **Durability:** `exchange_durable` applies to all modes (bool) or per-mode (dict with all three keys required).
+## Consuming and stopping
 
-RPC uses a callback/reply mechanism (`correlation_id`, reply queue) to deliver responses; `request(...)` returns a `Future` once the request is published and waiting is registered.
+Per-server consuming is managed by `Server.consume(...)` / `Server.stop_consume(...)`, which delegate to backend queue-level operations:
 
-## Consume and stop
+- `consume_rpc(queue, handler, *, options=None)`
+- `consume_task(queue, handler, *, options=None)`
+- `consume_event(queue, topics, handler, *, options=None)`
+- `stop_consume_rpc(queue=None)`
+- `stop_consume_tasks(queue=None)`
+- `stop_consume_events(queue=None, topic=None)`
 
-- `consume_rpc(queue, handler, *, options=None)` / `consume_task(queue, handler, *, options=None)` register consumers and bindings as required. If `options` includes an `RmqQueueOptions` instance, its queue/consumer settings are applied to that named RPC/task queue (other option types are ignored). If no per-queue options are provided, `queue_options` from `RmqBackend(...)` are used as backend defaults (single object for both rpc/task, or per-mode dict).
-- `consume_event(queue, topics, handler)` registers the instance event consumer and bindings using backend-static configuration (not configured via `App`).
-- `stop_consume_rpc(queue=None)` / `stop_consume_tasks(queue=None)` cancel consumer(s) for the mode/queue (and close dedicated per-queue channels when used).
-- `stop_consume_events(queue=None, topic=None)` cancels event consumer(s) or, when `topic` is provided, unbinds only that routing key/topic from the queue (without stopping the consumer).
+`stop_consume_events(queue, topic)` removes a topic binding/subscription without stopping the consumer when other bindings remain (subject to server state). Passing `queue=None` stops all consumers of that mode for this backend instance.
 
-## Per-queue options (`RmqQueueOptions`) for named RPC/task queues
+## Per-server queue options (`RmqQueueOptions`)
 
-Use `app.rpc_router(...)` / `app.task_router(...)` to configure a **named** RPC/task queue before `consume_*`. `RmqBackend` applies the `RmqQueueOptions` object from the provided options list. `path` is required and targets queue `app.name.<path>`.
-
-The default app queue (`app.name`) and event queues are not configured via routers/options from `App`; they use backend-static defaults.
+Configure broker/consumer options per server when creating it with `app.server(...)`:
 
 ```python
 from linkr import App
 from linkr.backends.rmq import RmqBackend, RmqQueueOptions
 
-backend = RmqBackend()
-app = App("orders", backend=backend)
-
-# named RPC queue ("orders.serviceA")
-rpc = app.rpc_router("serviceA", options=[RmqQueueOptions(prefetch_count=5, durable=True)])
-
-@rpc("ping")
-def ping() -> str:
-    return "pong"
-
-# named task queue ("orders.email"), shared by handlers on that queue
-email = app.task_router("email", options=[
-    RmqQueueOptions(prefetch_count=50, arguments={"x-max-priority": 10}),
-])
-
-@email("send")
-async def send(user_id: int) -> None:
-    ...
+app = App("orders", backend=RmqBackend())
+rpc = app.server("serviceA", rpc_options=[RmqQueueOptions(prefetch_count=5, durable=True)])
+email = app.server(
+    "email",
+    task_options=[RmqQueueOptions(
+        prefetch_count=50,
+        arguments={"x-max-length": 10_000, "x-dead-letter-exchange": "dlx"},
+    )],
+)
+events = app.server(event_options=[RmqQueueOptions(prefetch_count=20)])
 ```
 
-**Priority (highest first):** per-queue router options > backend `queue_options` defaults (single object or per-mode dict) > built-in mode defaults (durable for rpc/task, non-durable for event).
+- `rpc_options` / `task_options` / `event_options` apply to the corresponding consume mode for that server.
+- `RmqBackend` selects the `RmqQueueOptions` object from the provided options and applies it when consuming.
+- If no per-server option is provided for a mode, backend `queue_options` defaults (or mode defaults) apply.
 
 `RmqQueueOptions` fields:
 
-| Field | Default | Effect |
-|---|---|---|
-| `durable` | `None` | Queue durability (`None` → backend/mode default, durable for rpc/task) |
-| `exclusive` | `None` | Exclusive queue (`None` → `False` for rpc/task) |
-| `auto_delete` | `None` | Auto-delete queue (`None` → `False` for rpc/task) |
-| `passive` | `None` | Passive declare when set |
-| `arguments` | `None` | AMQP queue arguments (e.g. `x-max-length`, `x-dead-letter-exchange`, `x-queue-type`, `x-max-priority`) |
-| `prefetch_count` | `None` | Per-queue consumer QoS; when set, consume uses a dedicated channel |
-| `extra` | `{}` | Reserved for backend-specific extensions |
+- `durable`, `exclusive`, `auto_delete`, `passive` — queue declare flags (backend/mode defaults apply when `None`).
+- `arguments` — AMQP queue arguments (e.g. `x-max-length`, `x-dead-letter-exchange`, `x-queue-type`).
+- `prefetch_count` — consumer QoS prefetch for that queue/consumer (a dedicated channel may be used for per-queue overrides).
+- `extra` — reserved for future use.
 
-`None` means "do not override" the backend/mode default. Per-queue router options override `queue_options` backend defaults for that queue.
+Notes:
 
-## Usage example
+- Queue declare parameters must remain compatible with existing broker queues (changing them may raise precondition errors); use a new server/queue path when topology must differ.
+- Event queues are per-server instance queues (separate from RPC/task queues of the same server name).
+
+## Example
 
 ```python
 import asyncio
@@ -110,28 +120,36 @@ from linkr.backends.rmq import RmqBackend, RmqQueueOptions
 
 
 async def main() -> None:
-    backend = RmqBackend(host="localhost", port=5672)
-    app = App("orders", backend=backend)
+    app = App(
+        "orders",
+        backend=RmqBackend(host="localhost", port=5672),
+    )
 
-    rpc = app.rpc_router("serviceA", options=[RmqQueueOptions(prefetch_count=5)])
+    rpc = app.server("serviceA", rpc_options=[RmqQueueOptions(prefetch_count=5)])
+    root = app.server()
 
-    @rpc("ping")
+    @rpc.method("ping")
     def ping() -> str:
         return "pong"
 
+    @root.subscribe("user.created")
+    def on_user_created(user_id: int) -> None:
+        print("user", user_id)
+
     async with app:
-        await app.consume()
-        # client in another process/app can call "orders.serviceA.ping"
+        await rpc.consume(mode="rpc")
+        await root.consume(mode="event")
+        print(await app.client.call("orders.serviceA.ping", (), {}))
+        await app.client.emit("user.created", {"user_id": 1})
+        await asyncio.sleep(0.1)
 
 
 asyncio.run(main())
 ```
 
-## Operational notes
+## Notes
 
-- **External dependency:** requires a reachable RabbitMQ broker and appropriate permissions/vhost configuration.
-- **Durability and guarantees:** controlled by broker/exchange/queue settings and application patterns (ack/retry/idempotency are transport- and design-dependent). Validate behavior for your deployment.
-- **Queue declaration compatibility:** changing declaration parameters of an existing broker queue (e.g. durability, arguments, `x-queue-type`) can cause a broker precondition error; keep configuration consistent or use a new queue name.
-- **Event queues:** instance-specific event queues are configured statically by the backend (default exclusive/non-durable for the instance queue). App-level router/options do not configure event queues.
-- **Prefetch and concurrency:** `prefetch_count` affects delivery/throughput for competing consumers. Per-queue overrides for named RPC/task queues use a dedicated consumer channel; publishing remains on the main channel.
-- **Error handling:** task/event handler failures are handled at the app level (logged/hooks) and do not produce caller responses; broker-level redelivery/DLQ behavior depends on broker/backend semantics and configuration.
+- Requires a running RabbitMQ broker and appropriate permissions/vhost access.
+- Delivery guarantees and ordering depend on broker configuration and messaging patterns.
+- RPC uses a per-backend-instance callback queue for replies; tasks/events are published to exchanges/queues as configured.
+- `app.close()` stops server consumers and closes backend connections; pending RPC futures are failed on backend close.

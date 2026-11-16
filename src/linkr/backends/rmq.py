@@ -79,7 +79,7 @@ class RmqBackend(Backend):
         connection_name: str | None = None,
         exchange: str | dict[Mode, str] = "linkr",
         exchange_durable: bool | dict[Mode, bool] = True,
-        queue_options: RmqQueueOptions | dict[Literal["rpc", "task"], RmqQueueOptions] | None = None,
+        queue_options: RmqQueueOptions | dict[Literal["rpc", "task", "event"], RmqQueueOptions] | None = None,
         heartbeat: int = 30,
         blocked_connection_timeout: int = 30,
         results_queue_prefix: str | None = None,
@@ -101,8 +101,8 @@ class RmqBackend(Backend):
                 separate exchanges per mode (all keys required).
             exchange_durable: Whether the exchange(s) are durable. ``bool`` or
                 ``dict[Mode, bool]`` (same shape as *exchange*).
-            queue_options: Optional ``RmqQueueOptions`` (applied to both rpc
-                and task queues) or a ``dict[Literal["rpc","task"], RmqQueueOptions]``.
+            queue_options: Optional ``RmqQueueOptions`` (applied to all modes)
+                or a ``dict[Literal["rpc","task","event"], RmqQueueOptions]``.
             heartbeat: Heartbeat interval in seconds.
             blocked_connection_timeout: Timeout in seconds for blocked connections.
             results_queue_prefix: Prefix for the exclusive reply queue used by
@@ -128,7 +128,11 @@ class RmqBackend(Backend):
         self._callback_queue: AbstractQueue | None = None
         self._futures: dict[str, asyncio.Future[LinkrMessage]] = {}
         self._consumers: dict[str, dict[str, tuple[AbstractChannel, AbstractQueue, str]]] = {}
-        self._closing = False
+
+        self._op_lock = asyncio.Lock()
+
+        self._initialized = False
+        self._closed = False
 
         # Normalize exchange names and durables
         modes: tuple[Mode, ...] = ("rpc", "task", "event")
@@ -169,19 +173,21 @@ class RmqBackend(Backend):
 
         # Normalize queue options
         if queue_options is None:
-            queue_option_defaults: dict[str, RmqQueueOptions | None] = {"rpc": None, "task": None}
+            queue_option_defaults: dict[str, RmqQueueOptions | None] = {"rpc": None, "task": None, "event": None}
         elif isinstance(queue_options, RmqQueueOptions):
-            queue_option_defaults = {"rpc": queue_options, "task": queue_options}
+            queue_option_defaults = {"rpc": queue_options, "task": queue_options, "event": queue_options}
         else:
             if not isinstance(queue_options, dict):
-                raise TypeError("queue_options must be RmqQueueOptions, dict[rpc/task] or None")
-            missing = [m for m in ("rpc", "task") if m not in queue_options]
-            if missing:
-                raise ValueError(f"queue_options dict must contain rpc and task: {missing}")
-            extra = [k for k in queue_options if k not in ("rpc", "task")]
+                raise TypeError("queue_options must be RmqQueueOptions, dict[rpc/task/event] or None")
+            allowed = {"rpc", "task", "event"}
+            extra = [k for k in queue_options if k not in allowed]
             if extra:
                 raise ValueError(f"queue_options dict contains invalid mode keys: {extra}")
-            queue_option_defaults = {"rpc": queue_options["rpc"], "task": queue_options["task"]}
+            queue_option_defaults = {
+                "rpc": queue_options.get("rpc"),
+                "task": queue_options.get("task"),
+                "event": queue_options.get("event"),
+            }
             for mode, opt in queue_option_defaults.items():  # type: ignore[assignment]
                 if opt is not None and not isinstance(opt, RmqQueueOptions):
                     raise TypeError(f"queue_options[{mode!r}] must be RmqQueueOptions or None")
@@ -198,73 +204,120 @@ class RmqBackend(Backend):
     async def init(self) -> None:
         """Initialize the RabbitMQ backend: connect, declare exchanges and the reply queue."""
 
-        connect_kwds: dict[str, Any] = {
-            "host": self._host,
-            "port": self._port,
-            "virtualhost": self._virtualhost,
-            "heartbeat": self._heartbeat,
-            "blocked_connection_timeout": self._blocked_connection_timeout,
-        }
+        async with self._op_lock:
+            if self._initialized and not self._closed:
+                return
 
-        if self._ssl_context is not None:
-            connect_kwds["ssl_context"] = self._ssl_context
+            # Reset runtime state (supports re-init after close or failed init).
+            self._connection = None
+            self._channel = None
+            self._callback_queue = None
+            self._exchanges = {}
+            self._consumers = {}
+            self._fail_pending_futures(RuntimeError("backend reinitializing"))
+            self._initialized = False
+            self._closed = False
 
-        if self._auth_mechanism == "PLAIN":
-            connect_kwds["login"] = self._login
-            connect_kwds["password"] = self._password
-
-        if self._connection_name:
-            connect_kwds["client_properties"] = {
-                "connection_name": self._connection_name,
-            }
-
-        self._connection = await aio_pika.connect_robust(**connect_kwds)
-        self._channel = await self._connection.channel()
-
-        for mode in ("rpc", "task", "event"):
-            self._exchanges[mode] = await self._channel.declare_exchange(
-                self._exchange_names[mode],
-                type=self._exchange_types[mode],
-                durable=self._exchange_durables[mode],
-            )
-
-        self._callback_queue = await self._channel.declare_queue(
-            self._results_queue,
-            exclusive=True,
-            auto_delete=False,
-        )
-        await self._callback_queue.consume(self._on_rpc_response)
-
-    async def close(self, timeout: float | None = None) -> None:
-        """Close the RabbitMQ backend: stop consumers, drop the reply queue and disconnect."""
-
-        self._closing = True
-        await self.stop_consume_rpc()
-        await self.stop_consume_tasks()
-        await self.stop_consume_events()
-
-        if self._callback_queue is not None:
             try:
-                await self._callback_queue.delete(if_unused=False, if_empty=False)
+                connect_kwds: dict[str, Any] = {
+                    "host": self._host,
+                    "port": self._port,
+                    "virtualhost": self._virtualhost,
+                    "heartbeat": self._heartbeat,
+                    "blocked_connection_timeout": self._blocked_connection_timeout,
+                }
+
+                if self._ssl_context is not None:
+                    connect_kwds["ssl_context"] = self._ssl_context
+
+                if self._auth_mechanism == "PLAIN":
+                    connect_kwds["login"] = self._login
+                    connect_kwds["password"] = self._password
+
+                if self._connection_name:
+                    connect_kwds["client_properties"] = {
+                        "connection_name": self._connection_name,
+                    }
+
+                self._connection = await aio_pika.connect_robust(**connect_kwds)
+                self._channel = await self._connection.channel()
+
+                for mode in ("rpc", "task", "event"):
+                    self._exchanges[mode] = await self._channel.declare_exchange(
+                        self._exchange_names[mode],
+                        type=self._exchange_types[mode],
+                        durable=self._exchange_durables[mode],
+                    )
+
+                self._callback_queue = await self._channel.declare_queue(
+                    self._results_queue,
+                    exclusive=True,
+                    auto_delete=False,
+                )
+                await self._callback_queue.consume(self._on_rpc_response)
+
+                self._initialized = True
+                self._closed = False
+            except Exception:
+                await self._teardown_resources(delete_callback_queue=False)
+                self._fail_pending_futures(RuntimeError("backend initialization failed"))
+                self._exchanges = {}
+                self._consumers = {}
+                self._initialized = False
+                self._closed = True
+                raise
+
+    async def close(self) -> None:
+        """Close the RabbitMQ backend: stop consumers, drop the reply queue and disconnect."""
+        async with self._op_lock:
+            if self._closed and not self._initialized:
+                return
+
+            await self._stop_consumers("rpc")
+            await self._stop_consumers("task")
+            await self._stop_consumers("event")
+
+            self._fail_pending_futures(RuntimeError("backend closed"))
+
+            await self._teardown_resources(delete_callback_queue=True)
+
+            self._exchanges = {}
+            self._consumers = {}
+            self._initialized = False
+            self._closed = True
+
+    def _fail_pending_futures(self, exc: BaseException) -> None:
+        futures = list(self._futures.values())
+        self._futures.clear()
+        for future in futures:
+            if not future.done():
+                future.set_exception(exc)
+
+    async def _teardown_resources(self, *, delete_callback_queue: bool) -> None:
+        callback_queue = self._callback_queue
+        channel = self._channel
+        connection = self._connection
+        self._callback_queue = None
+        self._channel = None
+        self._connection = None
+
+        if callback_queue is not None and delete_callback_queue:
+            try:
+                await callback_queue.delete(if_unused=False, if_empty=False)
             except Exception:
                 logger.exception("Failed to delete callback queue")
-            self._callback_queue = None
 
-        if self._channel is not None:
+        if channel is not None:
             try:
-                await self._channel.close()
+                await channel.close()
             except Exception:
                 logger.exception("Failed to close channel")
-            self._channel = None
 
-        if self._connection is not None:
+        if connection is not None:
             try:
-                await self._connection.close()
+                await connection.close()
             except Exception:
                 logger.exception("Failed to close connection")
-            self._connection = None
-
-        self._exchanges.clear()
 
     async def stop_consume_rpc(self, queue: str | None = None) -> None:
         """Stop RPC consumers owned by this backend instance.
@@ -274,7 +327,8 @@ class RmqBackend(Backend):
                 consumer for the specified queue.
         """
 
-        await self._stop_consumers("rpc", queue=queue)
+        async with self._op_lock:
+            await self._stop_consumers("rpc", queue=queue)
 
     async def stop_consume_tasks(self, queue: str | None = None) -> None:
         """Stop task consumers owned by this backend instance.
@@ -284,7 +338,8 @@ class RmqBackend(Backend):
                 consumer for the specified queue.
         """
 
-        await self._stop_consumers("task", queue=queue)
+        async with self._op_lock:
+            await self._stop_consumers("task", queue=queue)
 
     async def stop_consume_events(self, queue: str | None = None, topic: str | None = None) -> None:
         """Stop event consumers or unbind event subscriptions owned by this backend instance.
@@ -297,19 +352,20 @@ class RmqBackend(Backend):
                 consumer. When ``None``, stop the targeted event consumer(s).
         """
 
-        if topic is not None and queue is not None:
-            consumer = self._consumers.get("event", {}).get(queue)
-            if consumer is None:
+        async with self._op_lock:
+            if topic is not None and queue is not None:
+                consumer = self._consumers.get("event", {}).get(queue)
+                if consumer is None:
+                    return
+                channel, rmq_queue, _ = consumer
+                try:
+                    exchange = await self._get_exchange(channel, "event")
+                    await rmq_queue.unbind(exchange, routing_key=topic)
+                except Exception:  # pragma: no cover - best effort cleanup
+                    logger.debug("Failed to unbind event topic %s for queue %s", topic, queue, exc_info=True)
                 return
-            channel, rmq_queue, _ = consumer
-            try:
-                exchange = await self._get_exchange(channel, "event")
-                await rmq_queue.unbind(exchange, routing_key=topic)
-            except Exception:  # pragma: no cover - best effort cleanup
-                logger.exception("Failed to unbind event topic %s for queue %s", topic, queue)
-            return
 
-        await self._stop_consumers("event", queue=queue)
+            await self._stop_consumers("event", queue=queue)
 
     async def _stop_consumers(self, mode: str, queue: str | None = None) -> None:
         mode_consumers = self._consumers.get(mode, {})
@@ -422,7 +478,8 @@ class RmqBackend(Backend):
             headers=headers,
             correlation_id=correlation_id,
             reply_to=reply_to,
-            content_type="application/json",
+            content_type=headers.get("content_type"),
+            content_encoding=headers.get("content_encoding"),
             delivery_mode=DeliveryMode.PERSISTENT,
             expiration=expiration,
         )
@@ -439,14 +496,22 @@ class RmqBackend(Backend):
     # ------------------------------------------------------------------
 
     def queue_name_to_rmq_queue_name(self, queue: str, mode: Mode) -> str:
-        """Map a linkr queue name to the physical RabbitMQ queue name for *mode*."""
+        """
+        Map a linkr queue name to the physical RabbitMQ queue name for *mode*.
 
+        Args:
+            queue: Logical linkr queue name.
+            mode: Delivery mode (``"rpc"``, ``"task"``, or ``"event"``).
+
+        Returns:
+            The physical RabbitMQ queue name.
+        """
         if mode == "rpc":
             return f"linkr.rpc.{queue}"
         if mode == "task":
-            return f"linkr.task.{queue}"
+            return f"linkr.tasks.{queue}"
         if mode == "event":
-            return f"linkr.event.{queue}"
+            return f"linkr.events.{queue}"
         return queue
 
     # ------------------------------------------------------------------
@@ -460,25 +525,51 @@ class RmqBackend(Backend):
         *,
         options: Sequence[QueueOptions] | None = None,
     ) -> None:
-        """Register an RPC consumer for *queue*."""
+        """
+        Register an RPC consumer for *queue*.
 
-        if self._exchanges.get("rpc") is None:
-            raise RuntimeError("backend not initialized")
+        Args:
+            queue: Queue name to consume from.
+            handler: Async callable that processes incoming messages.
+            options: Optional backend-specific queue options.
 
-        selected = self._select_options(options) or self._queue_option_defaults["rpc"]
-        channel = await self._channel_for_prefetch(None if selected is None else selected.prefetch_count)
-        exchange = await self._get_exchange(channel, "rpc")
-        queue_name = self.queue_name_to_rmq_queue_name(queue, "rpc")
-        declare_kwargs = self._queue_declare_kwargs("rpc", selected)
+        Raises:
+            RuntimeError: If the backend is not initialized.
+        """
+        async with self._op_lock:
+            if self._closed or not self._initialized or self._exchanges.get("rpc") is None:
+                raise RuntimeError("backend not initialized")
+            if queue in self._consumers.get("rpc", {}):
+                return
 
-        rmq_queue = await channel.declare_queue(queue_name, **declare_kwargs)
-        await rmq_queue.bind(exchange, routing_key=queue)
+            selected = self._select_options(options) or self._queue_option_defaults["rpc"]
+            channel = await self._channel_for_prefetch(None if selected is None else selected.prefetch_count)
+            exchange = await self._get_exchange(channel, "rpc")
+            queue_name = self.queue_name_to_rmq_queue_name(queue, "rpc")
+            declare_kwargs = self._queue_declare_kwargs("rpc", selected)
 
-        async def _rpc_handler(incoming: AbstractIncomingMessage) -> None:
-            await self._on_rpc_message(incoming, handler)
+            consumer_tag: str | None = None
+            try:
+                rmq_queue = await channel.declare_queue(queue_name, **declare_kwargs)
+                await rmq_queue.bind(exchange, routing_key=queue)
 
-        consumer_tag = await rmq_queue.consume(_rpc_handler)
-        self._consumers.setdefault("rpc", {})[queue] = (channel, rmq_queue, consumer_tag)
+                async def _rpc_handler(incoming: AbstractIncomingMessage) -> None:
+                    await self._on_rpc_message(incoming, handler)
+
+                consumer_tag = await rmq_queue.consume(_rpc_handler)
+                self._consumers.setdefault("rpc", {})[queue] = (channel, rmq_queue, consumer_tag)
+            except Exception:
+                if consumer_tag is not None:
+                    try:
+                        await rmq_queue.cancel(consumer_tag=consumer_tag)
+                    except Exception:  # pragma: no cover - best effort cleanup
+                        logger.exception("Failed to rollback RPC consumer for queue %s", queue)
+                if channel is not self._channel:
+                    try:
+                        await channel.close()
+                    except Exception:  # pragma: no cover - best effort cleanup
+                        logger.exception("Failed to close dedicated RPC channel for queue %s", queue)
+                raise
 
     async def _on_rpc_message(
         self,
@@ -490,13 +581,20 @@ class RmqBackend(Backend):
             response_message = await handler(linkr_message)
 
             if response_message is not None and incoming.reply_to and self._channel is not None:
+                rttl = response_message.headers.get("rttl")
+                expiration: timedelta | None = None
+                if rttl is not None:
+                    expiration = timedelta(seconds=float(rttl))
+
                 await self._channel.default_exchange.publish(
                     RobustMessage(
                         body=response_message.data,
                         headers=response_message.headers,
                         correlation_id=incoming.correlation_id,
-                        content_type="application/json",
+                        content_type=response_message.headers.get("content_type"),
+                        content_encoding=response_message.headers.get("content_encoding"),
                         delivery_mode=DeliveryMode.PERSISTENT,
+                        expiration=expiration,
                     ),
                     routing_key=incoming.reply_to,
                 )
@@ -508,13 +606,24 @@ class RmqBackend(Backend):
         *,
         context: dict[str, Any] | None = None,
     ) -> asyncio.Future[LinkrMessage]:
-        """Send an RPC request and return a Future for the response.
+        """
+        Send an RPC request and return a Future for the response.
 
         The method completes once the request has been published and response
         waiting has been registered. Await the returned Future to receive the
         response message.
-        """
 
+        Args:
+            queue: Target queue name.
+            message: Serialized request message.
+            context: Backend-specific publish/context metadata (unused).
+
+        Returns:
+            A future that resolves to the response message.
+
+        Raises:
+            RuntimeError: If the backend is not initialized.
+        """
         if self._channel is None or self._exchanges.get("rpc") is None or self._callback_queue is None:
             raise RuntimeError("backend not initialized")
 
@@ -570,25 +679,51 @@ class RmqBackend(Backend):
         *,
         options: Sequence[QueueOptions] | None = None,
     ) -> None:
-        """Register a task consumer for *queue*."""
+        """
+        Register a task consumer for *queue*.
 
-        if self._exchanges.get("task") is None:
-            raise RuntimeError("backend not initialized")
+        Args:
+            queue: Queue name to consume from.
+            handler: Async callable that processes incoming messages.
+            options: Optional backend-specific queue options.
 
-        selected = self._select_options(options) or self._queue_option_defaults["task"]
-        channel = await self._channel_for_prefetch(None if selected is None else selected.prefetch_count)
-        exchange = await self._get_exchange(channel, "task")
-        queue_name = self.queue_name_to_rmq_queue_name(queue, "task")
-        declare_kwargs = self._queue_declare_kwargs("task", selected)
+        Raises:
+            RuntimeError: If the backend is not initialized.
+        """
+        async with self._op_lock:
+            if self._closed or not self._initialized or self._exchanges.get("task") is None:
+                raise RuntimeError("backend not initialized")
+            if queue in self._consumers.get("task", {}):
+                return
 
-        rmq_queue = await channel.declare_queue(queue_name, **declare_kwargs)
-        await rmq_queue.bind(exchange, routing_key=queue)
+            selected = self._select_options(options) or self._queue_option_defaults["task"]
+            channel = await self._channel_for_prefetch(None if selected is None else selected.prefetch_count)
+            exchange = await self._get_exchange(channel, "task")
+            queue_name = self.queue_name_to_rmq_queue_name(queue, "task")
+            declare_kwargs = self._queue_declare_kwargs("task", selected)
 
-        async def _task_handler(incoming: AbstractIncomingMessage) -> None:
-            await self._on_task_message(incoming, handler)
+            consumer_tag: str | None = None
+            try:
+                rmq_queue = await channel.declare_queue(queue_name, **declare_kwargs)
+                await rmq_queue.bind(exchange, routing_key=queue)
 
-        consumer_tag = await rmq_queue.consume(_task_handler)
-        self._consumers.setdefault("task", {})[queue] = (channel, rmq_queue, consumer_tag)
+                async def _task_handler(incoming: AbstractIncomingMessage) -> None:
+                    await self._on_task_message(incoming, handler)
+
+                consumer_tag = await rmq_queue.consume(_task_handler)
+                self._consumers.setdefault("task", {})[queue] = (channel, rmq_queue, consumer_tag)
+            except Exception:
+                if consumer_tag is not None:
+                    try:
+                        await rmq_queue.cancel(consumer_tag=consumer_tag)
+                    except Exception:  # pragma: no cover - best effort cleanup
+                        logger.exception("Failed to rollback task consumer for queue %s", queue)
+                if channel is not self._channel:
+                    try:
+                        await channel.close()
+                    except Exception:  # pragma: no cover - best effort cleanup
+                        logger.exception("Failed to close dedicated task channel for queue %s", queue)
+                raise
 
     async def _on_task_message(
         self,
@@ -606,8 +741,17 @@ class RmqBackend(Backend):
         *,
         context: dict[str, Any] | None = None,
     ) -> None:
-        """Send a task to *queue*. No response is expected."""
+        """
+        Send a task to *queue*. No response is expected.
 
+        Args:
+            queue: Target queue name.
+            message: Serialized task message.
+            context: Backend-specific publish/context metadata (unused).
+
+        Raises:
+            RuntimeError: If the backend is not initialized.
+        """
         if self._channel is None or self._exchanges.get("task") is None:
             raise RuntimeError("backend not initialized")
 
@@ -623,6 +767,8 @@ class RmqBackend(Backend):
         queue: str,
         topics: list[str],
         handler: Handler,
+        *,
+        options: Sequence[QueueOptions] | None = None,
     ) -> None:
         """Register an event consumer.
 
@@ -630,25 +776,44 @@ class RmqBackend(Backend):
             queue: Physical queue owned by this consumer instance.
             topics: Topic patterns this queue is bound to.
             handler: Async callable receiving a raw event message.
+            options: Optional backend-specific queue options.
         """
 
-        if self._exchanges.get("event") is None:
-            raise RuntimeError("backend not initialized")
+        async with self._op_lock:
+            if self._closed or not self._initialized or self._exchanges.get("event") is None:
+                raise RuntimeError("backend not initialized")
+            if queue in self._consumers.get("event", {}):
+                return
 
-        channel = await self._channel_for_prefetch(None)
-        exchange = await self._get_exchange(channel, "event")
-        queue_name = self.queue_name_to_rmq_queue_name(queue, "event")
-        declare_kwargs = self._queue_declare_kwargs("event", None)
+            selected = self._select_options(options) or self._queue_option_defaults.get("event")
+            channel = await self._channel_for_prefetch(None if selected is None else selected.prefetch_count)
+            exchange = await self._get_exchange(channel, "event")
+            queue_name = self.queue_name_to_rmq_queue_name(queue, "event")
+            declare_kwargs = self._queue_declare_kwargs("event", selected)
 
-        rmq_queue = await channel.declare_queue(queue_name, **declare_kwargs)
-        for topic in topics:
-            await rmq_queue.bind(exchange, routing_key=topic)
+            consumer_tag: str | None = None
+            try:
+                rmq_queue = await channel.declare_queue(queue_name, **declare_kwargs)
+                for topic in topics:
+                    await rmq_queue.bind(exchange, routing_key=topic)
 
-        async def _event_handler(incoming: AbstractIncomingMessage) -> None:
-            await self._on_event_message(incoming, handler)
+                async def _event_handler(incoming: AbstractIncomingMessage) -> None:
+                    await self._on_event_message(incoming, handler)
 
-        consumer_tag = await rmq_queue.consume(_event_handler)
-        self._consumers.setdefault("event", {})[queue] = (channel, rmq_queue, consumer_tag)
+                consumer_tag = await rmq_queue.consume(_event_handler)
+                self._consumers.setdefault("event", {})[queue] = (channel, rmq_queue, consumer_tag)
+            except Exception:
+                if consumer_tag is not None:
+                    try:
+                        await rmq_queue.cancel(consumer_tag=consumer_tag)
+                    except Exception:  # pragma: no cover - best effort cleanup
+                        logger.exception("Failed to rollback event consumer for queue %s", queue)
+                if channel is not self._channel:
+                    try:
+                        await channel.close()
+                    except Exception:  # pragma: no cover - best effort cleanup
+                        logger.exception("Failed to close dedicated event channel for queue %s", queue)
+                raise
 
     async def _on_event_message(
         self,
@@ -666,8 +831,17 @@ class RmqBackend(Backend):
         *,
         context: dict[str, Any] | None = None,
     ) -> None:
-        """Publish an event to *topic*. No response is expected."""
+        """
+        Publish an event to *topic*. No response is expected.
 
+        Args:
+            topic: Event topic or routing key.
+            message: Serialized event message.
+            context: Backend-specific publish/context metadata (unused).
+
+        Raises:
+            RuntimeError: If the backend is not initialized.
+        """
         if self._channel is None or self._exchanges.get("event") is None:
             raise RuntimeError("backend not initialized")
 

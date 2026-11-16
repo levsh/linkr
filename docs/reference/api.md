@@ -6,7 +6,7 @@ Public API exported from `linkr` (see `src/linkr/__init__.py`) and key classes.
 
 ```python
 from linkr import (
-    App, RPCRouter, TaskRouter, get_current_request, Depends,
+    App, Server, get_current_request, Depends,
     Backend, LocalBackend, Mode, QueueOptions,
     Message, Request, Response, RequestType, ResponseType, HandlerInfo, ErrorInfo,
     Serializer, JsonSerializer, JsonRpcSerializer,
@@ -23,56 +23,59 @@ from linkr import (
 
 ## `App`
 
-`App(name, *, backend, ttl=None, rpc_timeout=None, rpc_ttl=None, rpc_rttl=None, task_timeout=None, task_ttl=None, event_ttl=None, serializer=None, validate_types=False)`
+`App(name, *, backend, serializer=None, middlewares=None, rpc_timeout=RPC_TIMEOUT, rpc_ttl=RPC_TTL, rpc_rttl=RPC_RTTL, task_timeout=TASK_TIMEOUT, task_ttl=TASK_TTL, event_ttl=EVENT_TTL, validate_types=False)`
 
-- **Registration:** `method(name, **options)`, `task(name, **options)`, `subscribe(topic, **options)`, `exception_handler(exc_class)`
-- **Queue/router configuration (named RPC/task queues):**
-  - `rpc_router(path: str, *, options=None) -> RPCRouter`
-  - `task_router(path: str, *, options=None) -> TaskRouter`
-  - `path` is required, non-empty, and targets queue `app.name.<path>`.
-  - `options`: `QueueOptions`, a sequence of `QueueOptions`, or `None` (backend-specific, opaque to `App`).
-  - Default app queue (`app.name`) and event queues are not configured via routers; they use backend-static defaults.
+Application infrastructure, lifecycle, hooks/middleware, and client API. Handler registration and consuming are performed on `Server` instances.
+
 - **Lifecycle:** `init()`, `close(timeout=None)`, async context manager
-- **Consume:** `consume()`, `consume_rpc()`, `consume_tasks()`, `consume_events()`
-- **Stop:** `stop_consume()`, `stop_consume_rpc(method=None)`, `stop_consume_tasks(task=None)`, `stop_consume_events(topic=None)`
-- **Client:** `call(method, args, kwds, *, request_id=None, timeout=None, ttl=None, rttl=None, serializer=None, context=None) -> Any`
-  `send(task, args, kwds, *, request_id=None, timeout=None, ttl=None, serializer=None, context=None) -> None`
-  `emit(topic, event, *, request_id=None, ttl=None, serializer=None, context=None) -> None`
-- **Middleware/Hooks:** `add_middleware(mw)`, `hooks` / `hook`, `add_hooks(observer)`, `remove_hooks(observer)`
-- **Contracts/Introspection:** `describe(*, include=None, include_internal=False) -> AppContract`, `describe_json(*, indent=2, **kwargs) -> str`, `describe_html(*, title=None, **describe_kwargs) -> str`, `expose_describe(name="linkr.describe", **handler_options)`
-- **Properties:** `name`, `methods`, `tasks`, `subscriptions`
+  - `init()` initializes backend and middleware.
+  - `close(timeout=None)` stops consuming on all servers, closes middleware and backend (the `timeout` argument is reserved for future graceful-shutdown control and is currently unused).
+- **Servers:** `server(path: str | None = None, *, rpc_options=None, task_options=None, event_options=None) -> Server`
+  - Returns a server scope for `path` (`None` = root, base queue `app.name`; `"group"` = `app.name.group`).
+  - Same `path` returns the same server when options match; conflicting options raise `ValueError`.
+  - `*_options`: `QueueOptions`, a sequence of `QueueOptions`, or `None` (backend-specific, opaque to `App`).
+- **Client:** 
+  - `call(method, args, kwds, *, request_id=None, timeout=None, ttl=None, rttl=None, serializer=None, context=None) -> Any`
+  - `send(task, args, kwds, *, request_id=None, timeout=None, ttl=None, serializer=None, context=None) -> None`
+  - `emit(topic, event, *, request_id=None, ttl=None, serializer=None, context=None) -> None`
+- **Middleware/Hooks/Errors:** `middlewares` (constructor, list of `AppMiddleware`/`WireMiddleware`), `hooks` / `hook`, `add_hooks(observer)`, `remove_hooks(observer)`, `exception_handler(exc_class)`
+- **Contracts/Introspection:** `describe(*, include=None, include_internal=False) -> AppContract`, `describe_json(*, indent=2, **kwargs) -> str`, `describe_html(*, title=None, **describe_kwargs) -> str`, `expose_describe(name="describe", server=None, **handler_options)`
+- **Properties:** `name`, `backend`, `hooks`, `servers`, `methods`, `tasks`, `subscriptions`
 
-Built-in defaults (used when the corresponding constructor argument is `None`):
+Built-in defaults (class constants):
 
-* `RPC_TIMEOUT = 300.0` (seconds)
-* `RPC_TTL = 300.0` (seconds)
-* `RPC_RTTL = 300.0` (seconds)
-* `TASK_TIMEOUT = None`
-* `TASK_TTL = 3600.0` (seconds)
-* `EVENT_TTL = 3600.0` (seconds)
+- `RPC_TIMEOUT = 60.0` (seconds)
+- `RPC_TTL = 60.0` (seconds)
+- `RPC_RTTL = 600.0` (seconds)
+- `TASK_TIMEOUT = 3600.0` (seconds)
+- `TASK_TTL = 3600.0` (seconds)
+- `EVENT_TTL = 3600.0` (seconds)
 
-For RPC calls the client waits up to `timeout + ttl` seconds for a response.
+For RPC calls the client waits for a response up to `timeout + ttl` seconds.
 
-Note: the constructor accepts `ttl`, `task_timeout`, `task_ttl`, and `event_ttl`
-for API symmetry, but they are currently not used to derive per-mode defaults;
-effective values fall back to the corresponding `rpc_*`/built-in defaults.
+There are no global `app.consume()` / `app.stop_consume()` methods; consuming is managed per `Server`.
 
-## `RPCRouter` / `TaskRouter`
+## `Server`
 
-Returned by `App.rpc_router(...)` / `App.task_router(...)`; bound to a named `(mode, queue)`.
+Created via `app.server(...)`. A server is bound to an app and queue scope.
 
-- **Registration:** `router(name, **options)` — callable decorator
-  - `name` must be a non-empty leaf (no `.`); registers as `<path>.<name>` on queue `app.name.<path>`.
-  - `handler_options` (e.g. `validate_types`) are handler options, not transport options.
-- **Properties:** `mode` (`"rpc"` or `"task"`), `path`
+- **Identity:** `app`, `path` (`None` for root), `queue_base` (`app.name` or `app.name.<path>`), `event_queue` (when event consuming is active)
+- **Registration (local leaf names, no `.` in method/task name):**
+  - `method(name, **options)` — register RPC handler on this server's queue (`<queue_base>.<name>`)
+  - `task(name, **options)` — register task handler on this server's queue
+  - `subscribe(topic, **options)` — register event subscriber (topic pattern) on this server's event queue
+  - Common handler option: `validate_types`
+- **Consuming:** `consume(mode=None)` / `stop_consume(mode=None)` where `mode` is `None | "rpc" | "task" | "event"`
+  - `consume` starts consuming for the specified/all applicable modes (idempotent).
+  - `stop_consume` pauses consuming for the specified/all modes (idempotent); registrations/subscriptions remain and can be resumed with `consume`.
+  - Each server has its own event queue; event consuming/stopping is scoped to the server.
+- **Introspection:** `methods`, `tasks`, `subscriptions` (handlers registered on this server)
 
 ## Backends
 
-- `Backend` (ABC): `init`, `close`, `consume_rpc(queue, handler, *, options=None)`, `consume_task(queue, handler, *, options=None)`, `consume_event(queue, topics, handler)`, `stop_consume_rpc/tasks/events`, `request -> asyncio.Future[Message]`, `send`, `emit`, deprecated `stop_consume(mode=None)`
-- `LocalBackend(name=None)`: in-process backend, `reset()` class method; accepts and ignores RPC/task queue `options`
-- `RmqBackend(...)`: RabbitMQ backend (`aio-pika`); see `RmqQueueOptions`
-
-Event queue/consumer configuration is backend-static (not configured via `App`).
+- `Backend` (ABC): `init`, `close`, `consume_rpc(queue, handler, *, options=None)`, `consume_task(queue, handler, *, options=None)`, `consume_event(queue, topics, handler, *, options=None)`, `stop_consume_rpc(queue=None)`, `stop_consume_tasks(queue=None)`, `stop_consume_events(queue=None, topic=None)`, `request(queue, message, *, context=None) -> asyncio.Future[Message]`, `send(queue, message, *, context=None)`, `emit(topic, message, *, context=None)`
+- `LocalBackend(name=None)`: in-process backend, `reset()` class method; ignores transport queue options
+- `RmqBackend(...)` (`linkr.backends.rmq`): RabbitMQ backend (`aio-pika`); see `RmqQueueOptions`
 
 ## Models and queue options
 
@@ -81,8 +84,8 @@ Event queue/consumer configuration is backend-static (not configured via `App`).
 - `Message(data: bytes, headers: dict)` — wire envelope
 - `ErrorInfo(error_code, error_message, error_details)`
 - `HandlerInfo` — registered handler metadata
-- `QueueOptions` — marker base for backend-specific queue/consumer options (core is transport-agnostic)
-- `RmqQueueOptions(...)` (`linkr.backends.rmq`) — RabbitMQ queue/consumer options for named RPC/task queues (`durable`, `exclusive`, `auto_delete`, `passive`, `arguments`, `prefetch_count`, `extra`; `None` = backend/mode default)
+- `QueueOptions` — marker base for backend-specific queue/consumer options
+- `RmqQueueOptions(...)` (`linkr.backends.rmq`) — RabbitMQ queue/consumer options (`durable`, `exclusive`, `auto_delete`, `passive`, `arguments`, `prefetch_count`, `extra`)
 
 ## Serialization
 
@@ -113,14 +116,11 @@ See [Configuration](configuration.md) and [Hooks events](hooks-events.md) for de
 
 ## Contracts / introspection
 
-- `App.describe(*, include=None, include_internal=False) -> AppContract` — builds a contract/spec model (`contract: "linkr/1.0-alpha"`, alpha) describing registered RPC methods, tasks, and event subscriptions. `include` can limit sections to any of `{"methods", "tasks", "events"}`.
-- `AppContract` (`linkr.contracts`) — Pydantic model of the contract (`methods`, `tasks`, `events`, `components`). Use `to_dict()` for a JSON-compatible wire dictionary, `to_json()` for a JSON string, and `to_html()` for a self-contained, human-readable HTML page.
-- `RpcMethodContract` / `TaskMethodContract` (`linkr.contracts`) — discriminated-by-`kind` method models (`rpc` → `call`+`output.schema`, `task` → `send`+`output: null`); `MethodContract` is their discriminated union.
-- `ContractBuilder(app, *, include=None, include_internal=False).build() -> AppContract` — assembles the contract model from an app.
-- `HtmlContractRenderer(contract, *, title=None).render() -> str` and `render_contract_html(contract, *, title=None) -> str` (`linkr.contracts`) — render a contract model/dictionary as self-contained HTML (no external dependencies).
-- `App.describe_json(*, indent=2, **kwargs) -> str` — JSON string form of the contract.
-- `App.describe_html(*, title=None, **describe_kwargs) -> str` — HTML form of the contract (accepts the same filtering kwargs as `describe()`).
-- `App.expose_describe(name="linkr.describe", **handler_options)` — registers an RPC handler (opt-in) that returns `describe().to_dict()`.
-- `App.subscriptions` — registered event subscriptions grouped by topic pattern.
+- `App.describe(*, include=None, include_internal=False) -> AppContract` — contract/spec (`contract: "linkr/1.0-alpha"`, alpha) describing registered RPC methods, tasks, and event subscriptions across servers.
+- `AppContract` (`linkr.contracts`) — `to_dict()`, `to_json()`, `to_html()`.
+- `ContractBuilder(...).build()`, `HtmlContractRenderer(...)`, `render_contract_html(...)`.
+- `App.describe_json(...)`, `App.describe_html(...)`.
+- `App.expose_describe(name="describe", server=None, **handler_options)` — registers an RPC handler on a server that returns `describe().to_dict()`.
+- `App.subscriptions` / `App.methods` / `App.tasks` — aggregated views across servers.
 
-Contract entries include fully qualified call/send targets, queue names, docstrings, input parameter metadata, JSON Schema fragments for `args`/`kwds`/payload/return (when available), and `validate_types` flags. `Depends[...]` parameters are excluded from public input contracts.
+Contract entries include fully qualified call/send targets, queue names, input/output schema fragments (when available), and `validate_types` flags. `Depends[...]` parameters are excluded from public input contracts.

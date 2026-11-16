@@ -45,8 +45,8 @@ class Depends(Generic[T]):
         """
         Args:
             factory: Optional callable that produces the dependency instance.
-                When None, the dependency must be resolved another way
-                (e.g. via an external container).
+                When omitted, the dependency type must be default-constructible
+                (it will be instantiated as ``type_()`` during resolution).
         """
         self.factory = factory
 
@@ -68,4 +68,5 @@ class Depends(Generic[T]):
         return Annotated[item, cls(None)]
 
     def __repr__(self) -> str:
+        """Return a string representation of the dependency marker."""
         return f"Depends[factory={self.factory is not None}]"

@@ -21,13 +21,12 @@ Emitted when consuming starts for a queue.
 |---|---|---|
 | `app` | `str` | Application name |
 | `mode` | `"rpc" \| "task" \| "event"` | Delivery mode |
-| `queue` | `str \| None` | Queue name; `None` for mass stop in some cases |
-| `topic` | `str \| None` | Event topic pattern when a specific subscription is removed |
-| `reason` | `"all" \| "queue_drained" \| "topic_unsubscribed"` | Stop reason |
+| `queue` | `str \| None` | Queue name |
+| `topic` | `str \| None` | Event topic pattern when applicable |
+| `reason` | `"stopped" \| "all" \| "queue_drained" \| "topic_unsubscribed"` | Stop reason (`ConsumeStopReason`) |
 
-- `all`: all consumers of the mode stopped
-- `queue_drained`: queue consumer stopped (no remaining handlers/subscriptions)
-- `topic_unsubscribed`: only the specified topic subscription removed; consumer remains active
+- `stopped`: consuming stopped for the server/mode/queue (emitted by `Server.stop_consume`)
+- `all`, `queue_drained`, `topic_unsubscribed`: additional reason values defined by the hook type
 
 ## Client-side
 

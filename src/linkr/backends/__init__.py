@@ -33,7 +33,7 @@ class Backend(ABC):
         """Initialize backend and declare required infrastructure."""
 
     @abstractmethod
-    async def close(self, timeout: float | None = None) -> None:
+    async def close(self) -> None:
         """Gracefully shut down the backend."""
 
     @abstractmethod
@@ -44,7 +44,14 @@ class Backend(ABC):
         *,
         options: Sequence[QueueOptions] | None = None,
     ) -> None:
-        """Register an RPC consumer for *queue*."""
+        """
+        Register an RPC consumer for *queue*.
+
+        Args:
+            queue: Queue name to consume from.
+            handler: Async callable that processes incoming messages.
+            options: Optional backend-specific queue options.
+        """
 
     @abstractmethod
     async def consume_task(
@@ -54,7 +61,14 @@ class Backend(ABC):
         *,
         options: Sequence[QueueOptions] | None = None,
     ) -> None:
-        """Register a task consumer for *queue*."""
+        """
+        Register a task consumer for *queue*.
+
+        Args:
+            queue: Queue name to consume from.
+            handler: Async callable that processes incoming messages.
+            options: Optional backend-specific queue options.
+        """
 
     @abstractmethod
     async def consume_event(
@@ -62,6 +76,8 @@ class Backend(ABC):
         queue: str,
         topics: list[str],
         handler: Handler,
+        *,
+        options: Sequence[QueueOptions] | None = None,
     ) -> None:
         """
         Register an event consumer.
@@ -70,6 +86,7 @@ class Backend(ABC):
             queue: Physical queue owned by this consumer instance.
             topics: Topic patterns this queue is bound to.
             handler: Async callable receiving a raw event message.
+            options: Optional backend-specific queue options.
         """
 
     @abstractmethod
@@ -107,7 +124,12 @@ class Backend(ABC):
         """
 
     async def stop_consume(self, mode: Mode | None = None) -> None:
-        """Deprecated compatibility shim. Use ``stop_consume_*`` methods."""
+        """
+        Deprecated compatibility shim. Use ``stop_consume_*`` methods.
+
+        Args:
+            mode: Delivery mode to stop, or ``None`` to stop all modes.
+        """
         if mode in (None, "rpc"):
             await self.stop_consume_rpc()
         if mode in (None, "task"):
@@ -129,6 +151,14 @@ class Backend(ABC):
         The method completes once the request has been published and response
         waiting has been registered. Await the returned Future to receive the
         response message.
+
+        Args:
+            queue: Target queue name.
+            message: Serialized request message.
+            context: Backend-specific publish/context metadata.
+
+        Returns:
+            A future that resolves to the RPC response message.
         """
 
     @abstractmethod
@@ -139,7 +169,14 @@ class Backend(ABC):
         *,
         context: dict[str, Any] | None = None,
     ) -> None:
-        """Send a task to *queue*. No response is expected."""
+        """
+        Send a task to *queue*. No response is expected.
+
+        Args:
+            queue: Target queue name.
+            message: Serialized task message.
+            context: Backend-specific publish/context metadata.
+        """
 
     @abstractmethod
     async def emit(
@@ -149,4 +186,11 @@ class Backend(ABC):
         *,
         context: dict[str, Any] | None = None,
     ) -> None:
-        """Publish an event to *topic*. No response is expected."""
+        """
+        Publish an event to *topic*. No response is expected.
+
+        Args:
+            topic: Event topic or routing key.
+            message: Serialized event message.
+            context: Backend-specific publish/context metadata.
+        """

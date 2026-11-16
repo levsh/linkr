@@ -7,107 +7,68 @@ App(
     name: str,
     *,
     backend: Backend,
-    ttl: float | None = None,
-    rpc_timeout: float | None = None,
-    rpc_ttl: float | None = None,
-    rpc_rttl: float | None = None,
-    task_timeout: float | None = None,
-    task_ttl: float | None = None,
-    event_ttl: float | None = None,
     serializer: Serializer | list[Serializer] | None = None,
+    middlewares: Sequence[AppMiddleware | WireMiddleware] | None = None,
+    rpc_timeout: float = RPC_TIMEOUT,
+    rpc_ttl: float = RPC_TTL,
+    rpc_rttl: float = RPC_RTTL,
+    task_timeout: float = TASK_TIMEOUT,
+    task_ttl: float = TASK_TTL,
+    event_ttl: float = EVENT_TTL,
     validate_types: bool = False,
 )
 ```
 
 | Parameter | Default | Description |
 |---|---|---|
-| `name` | required | Application name; used as default queue prefix and in event queue naming |
+| `name` | required | Application name; used as queue prefix and in server/event queue naming |
 | `backend` | required | `Backend` implementation (`LocalBackend`, `RmqBackend`, custom) |
-| `ttl` | `None` | Accepted for API symmetry; currently not used to derive per-mode defaults |
-| `rpc_timeout` | `None` (RPC default `300.0`) | Default RPC timeout (seconds) for outgoing requests; sent in request headers |
-| `rpc_ttl` | `None` (RPC default `300.0`) | Default RPC message TTL (seconds) |
-| `rpc_rttl` | `None` (RPC default `300.0`) | Default response TTL (seconds, RPC) |
-| `task_timeout` | `None` | Accepted but not used; effective task timeout falls back to `TASK_TIMEOUT` (`None`) |
-| `task_ttl` | `None` | Accepted but not used; effective task TTL falls back to `TASK_TTL` (`3600.0`) |
-| `event_ttl` | `None` | Accepted but not used; effective event TTL falls back to `EVENT_TTL` (`3600.0`) |
-| `serializer` | `JsonSerializer()` | Single serializer or list; first is default for outgoing, list enables server auto-detection |
+| `serializer` | `JsonSerializer()` | Single serializer or list; first is default for outgoing, list enables auto-detection |
+| `middlewares` | `None` | List of `AppMiddleware`/`WireMiddleware` instances; initialized/closed with the app and applied across its servers |
+| `rpc_timeout` | `RPC_TIMEOUT` (`60.0`) | Default RPC handler execution timeout (seconds) |
+| `rpc_ttl` | `RPC_TTL` (`60.0`) | Default RPC request time-to-live (seconds) |
+| `rpc_rttl` | `RPC_RTTL` (`600.0`) | Default RPC response time-to-live (seconds) |
+| `task_timeout` | `TASK_TIMEOUT` (`3600.0`) | Default task handler execution timeout (seconds) |
+| `task_ttl` | `TASK_TTL` (`3600.0`) | Default task time-to-live (seconds) |
+| `event_ttl` | `EVENT_TTL` (`3600.0`) | Default event time-to-live (seconds) |
 | `validate_types` | `False` | Default argument type validation for handlers (overridable per handler) |
 
-**Constants:** `RPC_TIMEOUT = 300.0`, `RPC_TTL = 300.0`, `RPC_RTTL = 300.0`, `TASK_TIMEOUT = None`, `TASK_TTL = 3600.0`, `EVENT_TTL = 3600.0`. For RPC, the client waits for a response up to `timeout + ttl` seconds.
+**Class constants:** `RPC_TIMEOUT = 60.0`, `RPC_TTL = 60.0`, `RPC_RTTL = 600.0`, `TASK_TIMEOUT = 3600.0`, `TASK_TTL = 3600.0`, `EVENT_TTL = 3600.0`. For RPC, the client waits for a response up to `timeout + ttl` seconds.
 
-## Named RPC/task queue routers and options
+## `Server` and per-server queue options
 
-Use `app.rpc_router(...)` / `app.task_router(...)` to configure transport/backend
-options for a **named** RPC or task queue and to register handlers on it.
-Options are backend-specific and opaque to `App`: the active backend selects
-option types it understands and ignores the rest.
-
-Routers do not apply to the default app queue (`app.name`) and do not apply to
-event queues. Default and event queue options are static backend configuration.
+Servers are created and configured via `App.server(...)`:
 
 ```python
-rpc_router = app.rpc_router(
-    path: str,
+server = app.server(
+    path: str | None = None,
     *,
-    options: QueueOptions | Sequence[QueueOptions] | None = None,
-) -> RPCRouter
-
-task_router = app.task_router(
-    path: str,
-    *,
-    options: QueueOptions | Sequence[QueueOptions] | None = None,
-) -> TaskRouter
+    rpc_options: QueueOptions | Sequence[QueueOptions] | None = None,
+    task_options: QueueOptions | Sequence[QueueOptions] | None = None,
+    event_options: QueueOptions | Sequence[QueueOptions] | None = None,
+) -> Server
 ```
 
-- **Target queue:** configuration unit is `(mode, queue)` where queue is
-  `f"{app.name}.{path}"`.
-  - `path` is required and must be a non-empty string.
-  - The default queue (`app.name`) and the per-instance event queue are not
-    configurable via `App`; backends apply their own defaults.
-- **Options:** a single `QueueOptions` instance, a sequence of them, or `None`.
-  - Pass a list to provide options for multiple backends; each backend picks its
-    own type.
-  - Each element must be a `QueueOptions` instance; duplicate option types in one
-    list are rejected.
-  - `options=None` leaves existing queue configuration unchanged (useful to
-    obtain a handle).
-- **Rules:** declare before `consume_*` for that queue. A queue cannot be
-  (re)configured while it is consuming. One queue has one option set:
-  re-declaring with different options raises `ValueError`; an identical
-  declaration is idempotent.
-- **`RPCRouter` / `TaskRouter` handle:** `@router("name", **handler_options)`
-  registers a leaf handler on the router queue.
-  - `name` must be a non-empty leaf (no `.`); full handler name becomes
-    `<path>.<name>` on queue `app.name.<path>`.
-  - `handler_options` (e.g. `validate_types`) are handler options, not transport
-    options.
-- Handlers registered via `@app.method/task` with full names use the configured
-  options of their resolved queue as well.
+- **Scope/queue:** `path=None` → root server, base queue `app.name`; `path="group"` → queue `app.name.group`.
+- **Handler registration (on server):** `@server.method(name, **opts)`, `@server.task(name, **opts)`, `@server.subscribe(topic, **opts)`. Method/task `name` is a local leaf (must not contain `.`). Common option: `validate_types`.
+- **Consume control:** `server.consume(mode=None|"rpc"|"task"|"event")`, `server.stop_consume(mode=None|...)` (pause/resume, per server and mode).
+- **Options:** backend-specific and opaque to `App`; a `QueueOptions` instance, a sequence, or `None`. The active backend selects option types it understands. Repeated `app.server` for the same path returns the same server if options match (conflicting options raise `ValueError`).
+- **Events:** each server has its own event queue; `event_options` apply to that server's event consumer/queue when supported by the backend.
+
+Example:
 
 ```python
-from linkr import App, QueueOptions
-from linkr.backends.rmq import RmqQueueOptions
+from linkr import App
+from linkr.backends.rmq import RmqBackend, RmqQueueOptions
 
-app = App("orders", backend=backend)
+app = App("orders", backend=RmqBackend())
+rpc = app.server("serviceA", rpc_options=[RmqQueueOptions(prefetch_count=5, durable=True)])
+events = app.server(event_options=[RmqQueueOptions(prefetch_count=10)])
 
-# named RPC queue ("orders.serviceA")
-rpc = app.rpc_router("serviceA", options=[RmqQueueOptions(prefetch_count=5, durable=True)])
-
-@rpc("ping")
+@rpc.method("ping")
 def ping() -> str:
     return "pong"
-
-# named task queue ("orders.email")
-email = app.task_router("email", options=[RmqQueueOptions(prefetch_count=50)])
-
-@email("send")
-async def send(user_id: int) -> None:
-    ...
 ```
-
-`QueueOptions` is a marker base in `linkr.models` (exported as
-`linkr.QueueOptions`). Backends define concrete option types (e.g.
-`RmqQueueOptions`).
 
 ## Client call parameters
 
@@ -121,12 +82,14 @@ async def send(user_id: int) -> None:
 
 ## Handler options
 
-Decorators accept `**options`, commonly:
+Server decorators accept `**options`, commonly:
 
 - `validate_types: bool` — enable/disable argument validation for that handler.
 
 ```python
-@app.method("add", validate_types=True)
+server = app.server()
+
+@server.method("add", validate_types=True)
 def add(x: int, y: int) -> int: ...
 ```
 
@@ -136,9 +99,8 @@ def add(x: int, y: int) -> int: ...
 LocalBackend(name: str | None = None)
 ```
 
-- In-process routing; `name` kept for compatibility.
-- Class-level state shared in process; `LocalBackend.reset()` clears consumers/state.
-- Accepts and ignores per-queue RPC/task router `options`; event queue behavior is in-process/backend-defined.
+- In-process routing; `LocalBackend.reset()` clears shared in-process state.
+- Ignores transport queue options.
 
 ## `RmqBackend`
 
@@ -155,7 +117,7 @@ RmqBackend(
     connection_name: str | None = None,
     exchange: str | dict[Mode, str] = "linkr",
     exchange_durable: bool | dict[Mode, bool] = True,
-    queue_options: RmqQueueOptions | dict[Literal["rpc", "task"], RmqQueueOptions] | None = None,
+    queue_options: RmqQueueOptions | dict[Literal["rpc", "task", "event"], RmqQueueOptions] | None = None,
     heartbeat: int = 30,
     blocked_connection_timeout: int = 30,
     results_queue_prefix: str | None = None,
@@ -163,20 +125,11 @@ RmqBackend(
 ```
 
 - Requires `aio-pika` (`pip install "linkr[rabbitmq]"`).
-- `login`/`password` are used for `PLAIN` auth; `ssl_context` enables TLS; `connection_name` sets AMQP client properties when provided.
-- **Exchange configuration:**
-  - Single exchange (default): `exchange="linkr"` (str) — one TOPIC exchange named `linkr` shared by RPC, tasks, and events.
-  - Per-mode exchanges: `exchange={"rpc": "...", "task": "...", "event": "..."}` — separate exchanges for each mode. RPC and tasks use DIRECT type; events use TOPIC type. All three mode keys are required.
-- **Durability:** `exchange_durable` applies to all modes (bool) or per-mode (dict with all three keys required).
-- **Queue options defaults:** `queue_options` provides default `RmqQueueOptions` for RPC/task queues when no per-queue router options are provided. Accepts a single object (applies to both rpc and task) or a dict with "rpc" and "task" keys (both required).
-- `heartbeat` and `blocked_connection_timeout` are connection settings. `results_queue_prefix` (default `linkr.res.`) prefixes the exclusive RPC callback queue.
-- Event queue/consumer settings are static backend configuration (not configured via `App` routers/options).
+- **Exchange:** single string (one exchange for all modes) or per-mode dict `{"rpc","task","event"}`. Types: rpc/task `DIRECT` in per-mode config, event `TOPIC`.
+- **Queue option defaults:** `queue_options` may be a single `RmqQueueOptions` (all modes) or a per-mode dict for `rpc`/`task`/`event`; per-server options override defaults for that consume.
+- Per-server event queues are distinct queues scoped to each server instance.
 
 ### `RmqQueueOptions`
-
-Per-queue/consumer options selected by `RmqBackend` from
-`app.rpc_router(..., options=[...])` / `app.task_router(..., options=[...])`
-for named RPC/task queues:
 
 ```python
 from linkr.backends.rmq import RmqQueueOptions
@@ -192,14 +145,9 @@ RmqQueueOptions(
 )
 ```
 
-- `None` fields keep backend/mode defaults. RPC/task queue defaults are durable, non-exclusive, non-auto-delete unless overridden by `queue_options` on `RmqBackend` or by per-queue router options.
-- `arguments` is passed to queue declaration (e.g. `x-max-length`,
-  `x-dead-letter-exchange`, `x-queue-type`, `x-max-priority`).
-- `prefetch_count` overrides consumer QoS for that queue by consuming on a
-  dedicated channel (publishing still uses the main channel). If not set in
-  per-queue or backend-level options, no explicit QoS is set (broker default
-  applies).
-- `queue_options` on `RmqBackend` provides backend-level defaults (single `RmqQueueOptions` for both rpc/task, or a dict with "rpc" and "task" keys); per-queue router options override them for that queue.
+- `None` fields keep backend/mode defaults.
+- `arguments` passed to queue declaration (e.g. `x-max-length`, `x-dead-letter-exchange`).
+- `prefetch_count` sets consumer QoS (dedicated channel may be used for overrides).
 
 ## Middleware
 
@@ -212,5 +160,5 @@ RmqQueueOptions(
 
 ## Notes
 
-- Event queue per app instance: `<app_name>.<instance_id>` (logical queue name; RabbitMQ maps it to `linkr.event.<app_name>.<instance_id>`).
-- Routing/queue derivation from names: see [Routing and naming](../concepts/routing-and-naming.md). Per-queue options for named RPC/task queues are applied when `consume_*` starts for the queue. Re-declaring an existing broker queue with incompatible parameters may fail with a broker precondition error.
+- Server event queue naming is per server scope and app instance (logical queue mapped by backend, e.g. RabbitMQ `linkr.events.<queue>`).
+- Routing/queue derivation from names: see [Routing and naming](../concepts/routing-and-naming.md).

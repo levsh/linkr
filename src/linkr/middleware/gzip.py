@@ -10,7 +10,17 @@ from . import WireMiddleware
 
 def _merge_ce(headers: dict[str, Any], name: str) -> None:
     existing = headers.get("content_encoding", "")
-    headers["content_encoding"] = f"{existing},{name}" if existing else name
+    encodings = [part.strip() for part in existing.split(",") if part.strip()] if existing else []
+    if name not in encodings:
+        encodings.append(name)
+    headers["content_encoding"] = ",".join(encodings)
+
+
+def _has_ce(headers: dict[str, Any], name: str) -> bool:
+    value = headers.get("content_encoding", "")
+    if not value:
+        return False
+    return name in [part.strip() for part in value.split(",") if part.strip()]
 
 
 class GzipMiddleware(WireMiddleware):
@@ -39,11 +49,16 @@ class GzipMiddleware(WireMiddleware):
         context: dict[str, Any] | None = None,
     ) -> Message | None:
         """
-        Compress outgoing request, decompress incoming response.
+        Compress outgoing request data and decompress incoming response data.
 
-        Mutates *request_message* in place before calling the next layer,
-        and mutates the returned response :class:`Message` in place
-        before returning.
+        Args:
+            call_next: Next layer in the wire middleware chain.
+            request: Outgoing request object.
+            request_message: Serialized request message (mutated in place).
+            context: Backend-specific publish/context metadata.
+
+        Returns:
+            The response message from downstream, or ``None`` for fire-and-forget.
         """
         if len(request_message.data) >= self._min_size:
             request_message.data = gzip.compress(request_message.data)
@@ -51,7 +66,7 @@ class GzipMiddleware(WireMiddleware):
 
         response_message = await call_next()
 
-        if response_message is not None and "gzip" in response_message.headers.get("content_encoding", ""):
+        if response_message is not None and _has_ce(response_message.headers, "gzip"):
             response_message.data = gzip.decompress(response_message.data)
 
         return response_message
@@ -62,13 +77,16 @@ class GzipMiddleware(WireMiddleware):
         request_message: Message,
     ) -> tuple[Message, Response] | tuple[None, None]:
         """
-        Decompress incoming request, compress outgoing response.
+        Decompress incoming request data and compress outgoing response data.
 
-        Mutates *request_message* in place before calling the next layer,
-        and mutates the returned response :class:`Message` in place
-        before returning.
+        Args:
+            call_next: Next layer in the wire middleware chain.
+            request_message: Serialized incoming request message (mutated in place).
+
+        Returns:
+            A ``(response_message, response)`` tuple, or ``(None, None)``.
         """
-        if "gzip" in request_message.headers.get("content_encoding", ""):
+        if _has_ce(request_message.headers, "gzip"):
             request_message.data = gzip.decompress(request_message.data)
 
         result = await call_next()

@@ -5,7 +5,7 @@
 ## `call` — RPC
 
 ```python
-result = await app.call(
+result = await app.client.call(
     "orders.math.add",
     (1, 2),
     {},
@@ -37,7 +37,7 @@ result = await app.call(
 ## `send` — Task
 
 ```python
-await app.send(
+await app.client.send(
     "worker.email.send",
     (),
     {"user_id": 42},
@@ -67,7 +67,7 @@ await app.send(
 ## `emit` — Event
 
 ```python
-await app.emit(
+await app.client.emit(
     "user.created",
     {"user_id": 42, "email": "u@example.com"},
     request_id=None,
@@ -93,15 +93,15 @@ await app.emit(
 ## Argument conventions
 
 - `args` and `kwds` are always explicit parameters (not `*args/**kwargs`):
-  - positional-only call: `await app.call("app.m", (1, 2), {})`
-  - keyword call: `await app.call("app.m", (), {"x": 1, "y": 2})`
+  - positional-only call: `await app.client.call("app.m", (1, 2), {})`
+  - keyword call: `await app.client.call("app.m", (), {"x": 1, "y": 2})`
 - The routed method/task name in the message payload is the **last segment** of the provided path; the target queue is resolved from the path (see [Routing and naming](../concepts/routing-and-naming.md)).
 
 ## Defaults and headers
 
-- App-level defaults: `App(..., timeout=..., ttl=..., rttl=...)`.
-- RPC built-in defaults when unset: `RPC_TIMEOUT = 300.0`, `RPC_TTL = 300.0`.
-- Effective values are carried in request headers (`queue`, `timeout`, `ttl`, `rttl`) and influence client waiting/handler behavior as applicable.
+- App-level defaults: `App(..., rpc_timeout=..., rpc_ttl=..., rpc_rttl=..., task_timeout=..., task_ttl=..., event_ttl=...)` (class defaults: `RPC_TIMEOUT = 60.0`, `RPC_TTL = 60.0`, `RPC_RTTL = 600.0`, `TASK_TIMEOUT = 3600.0`, `TASK_TTL = 3600.0`, `EVENT_TTL = 3600.0`).
+- Per-call `timeout`/`ttl`/`rttl` (where applicable) override the corresponding app defaults.
+- Effective values are carried in request headers (`queue`, `timeout`, `ttl`, `rttl`) and influence client waiting/handler behavior as applicable. For RPC, the client waits for a response up to `timeout + ttl` seconds.
 
 ## Serializer selection
 

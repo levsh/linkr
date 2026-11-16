@@ -55,7 +55,7 @@ class LocalBackend(Backend):
     async def init(self) -> None:
         """No-op for local backend."""
 
-    async def close(self, timeout: float | None = None) -> None:
+    async def close(self) -> None:
         """Unregister all consumers owned by this backend instance."""
         await self.stop_consume_rpc()
         await self.stop_consume_tasks()
@@ -68,7 +68,14 @@ class LocalBackend(Backend):
         *,
         options: Any = None,
     ) -> None:
-        """Register an RPC consumer for *queue*."""
+        """
+        Register an RPC consumer for *queue*.
+
+        Args:
+            queue: Queue name to consume from.
+            handler: Async callable that processes incoming messages.
+            options: Optional backend-specific queue options (ignored).
+        """
         self._add_consumer(self._rpc_consumers, queue, handler)
 
     async def consume_task(
@@ -78,7 +85,14 @@ class LocalBackend(Backend):
         *,
         options: Any = None,
     ) -> None:
-        """Register a task consumer for *queue*."""
+        """
+        Register a task consumer for *queue*.
+
+        Args:
+            queue: Queue name to consume from.
+            handler: Async callable that processes incoming messages.
+            options: Optional backend-specific queue options (ignored).
+        """
         self._add_consumer(self._task_consumers, queue, handler)
 
     async def consume_event(
@@ -86,6 +100,8 @@ class LocalBackend(Backend):
         queue: str,
         topics: list[str],
         handler: Handler,
+        *,
+        options: Any = None,
     ) -> None:
         """
         Register an event consumer.
@@ -94,6 +110,7 @@ class LocalBackend(Backend):
             queue: Physical queue owned by this consumer instance.
             topics: Topic patterns this queue is bound to.
             handler: Async callable receiving a raw event message.
+            options: Optional backend-specific queue options (ignored).
         """
         self._event_consumers[queue] = _EventConsumer(
             backend=self,
@@ -103,17 +120,33 @@ class LocalBackend(Backend):
         )
 
     async def stop_consume_rpc(self, queue: str | None = None) -> None:
-        """Stop RPC consumers owned by this backend instance."""
+        """
+        Stop RPC consumers owned by this backend instance.
+
+        Args:
+            queue: Queue name to stop, or ``None`` to stop all RPC consumers.
+        """
         self._remove_consumers(self._rpc_consumers, queue=queue)
         self._clear_round_robin("rpc", queue)
 
     async def stop_consume_tasks(self, queue: str | None = None) -> None:
-        """Stop task consumers owned by this backend instance."""
+        """
+        Stop task consumers owned by this backend instance.
+
+        Args:
+            queue: Queue name to stop, or ``None`` to stop all task consumers.
+        """
         self._remove_consumers(self._task_consumers, queue=queue)
         self._clear_round_robin("task", queue)
 
     async def stop_consume_events(self, queue: str | None = None, topic: str | None = None) -> None:
-        """Stop event consumers or unbind subscriptions owned by this backend instance."""
+        """
+        Stop event consumers or unbind subscriptions owned by this backend instance.
+
+        Args:
+            queue: Event queue name to target, or ``None`` for all event consumers.
+            topic: Topic pattern to unbind when *queue* is provided; ``None`` stops consumers.
+        """
         if topic is not None and queue is not None:
             consumer = self._event_consumers.get(queue)
             if consumer is not None and consumer.backend is self:
@@ -137,7 +170,20 @@ class LocalBackend(Backend):
         *,
         context: dict[str, Any] | None = None,
     ) -> asyncio.Future[Message]:
-        """Send an RPC request and return a Future for the response."""
+        """
+        Send an RPC request and return a Future for the response.
+
+        Args:
+            queue: Target queue name.
+            message: Serialized request message.
+            context: Backend-specific publish/context metadata (unused).
+
+        Returns:
+            A future that resolves to the response message.
+
+        Raises:
+            RuntimeError: If no RPC consumer is registered for *queue*.
+        """
         handler = self._pick("rpc", queue, self._rpc_consumers.get(queue))
         if handler is None:
             raise RuntimeError(f"no RPC consumer registered for queue: {queue}")
@@ -150,9 +196,7 @@ class LocalBackend(Backend):
                 response = await handler(message)
                 if response is None:
                     if not future.done():
-                        future.set_exception(
-                            RuntimeError(f"RPC handler for queue {queue!r} returned no response")
-                        )
+                        future.set_exception(RuntimeError(f"RPC handler for queue {queue!r} returned no response"))
                     return
                 if not future.done():
                     future.set_result(response)
@@ -170,7 +214,14 @@ class LocalBackend(Backend):
         *,
         context: dict[str, Any] | None = None,
     ) -> None:
-        """Deliver a task to exactly one consumer."""
+        """
+        Deliver a task to exactly one consumer.
+
+        Args:
+            queue: Target queue name.
+            message: Serialized task message.
+            context: Backend-specific publish/context metadata (unused).
+        """
         handler = self._pick("task", queue, self._task_consumers.get(queue))
         if handler is None:
             logger.warning("No task consumer registered for queue: %s", queue)
@@ -188,7 +239,14 @@ class LocalBackend(Backend):
         *,
         context: dict[str, Any] | None = None,
     ) -> None:
-        """Deliver an event to every matching consumer."""
+        """
+        Deliver an event to every matching consumer.
+
+        Args:
+            topic: Event topic or routing key.
+            message: Serialized event message.
+            context: Backend-specific publish/context metadata (unused).
+        """
         consumers = [consumer for consumer in list(self._event_consumers.values()) if consumer.matches(topic)]
         if not consumers:
             return

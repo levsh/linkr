@@ -1,69 +1,76 @@
 # Delivery modes
 
-`linkr` supports three delivery modes. The mode determines registration, client API, consumer behavior, and response semantics.
+linkr provides three messaging patterns over the same app/backend model. `App` is the client/infrastructure; handlers and consuming live on `Server`.
 
 ## Comparison
 
 | Aspect | RPC | Task | Event |
 |---|---|---|---|
-| Decorator | `@app.method(name, **options)` | `@app.task(name, **options)` | `@app.subscribe(topic, **options)` |
-| Client call | `await app.call(name, args, kwds, ...)` | `await app.send(name, args, kwds, ...)` | `await app.emit(topic, event, ...)` |
-| Consumers | Competing: exactly one handler processes a request | Competing: exactly one handler processes a task | Fan-out: every matching subscriber receives the event |
-| Response to caller | Yes (`result` or `RPCError`) | No | No |
-| Typical use | Query/command requiring result | Background job | Domain notification/broadcast |
+| Decorator | `@server.method(name, **options)` | `@server.task(name, **options)` | `@server.subscribe(topic, **options)` |
+| Client call | `app.client.call(target, args, kwds)` | `app.client.send(target, args, kwds)` | `app.client.emit(topic, event_dict)` |
+| Response | Yes (`Response` / result) | No | No |
+| Consumers | One handler processes a request (competing on a queue) | One consumer processes each task (competing) | All matching subscribers on consuming servers receive it (fan-out) |
+| Typical use | Queries/commands needing a result | Background jobs | Notifications/state changes |
 
 ## RPC
 
-RPC is request/response. The caller awaits a result (or an error).
-
 ```python
-@app.method("math.add")
+app = App("orders", backend=backend)
+math = app.server("math")
+
+@math.method("add")
 def add(x: int, y: int) -> int:
     return x + y
 
-result = await app.call("app.math.add", (1, 2), {})
+await app.init()
+await math.consume(mode="rpc")
+result = await app.client.call("orders.math.add", (2, 3), {})
 ```
 
-- Method dispatch is by name within a queue.
-- Supports `timeout`, `ttl`, and `rttl` headers/parameters.
-- Server-side failures are mapped to error responses; on the client this raises `RPCError`.
+- Request/response with correlation.
+- Errors propagate as error responses (client receives `RPCError`).
+- Timeout/TTL can be controlled per call and by app defaults.
 
 ## Task
 
-A task is dispatched to one of the consumers of its queue. The caller does not receive a result.
-
 ```python
-@app.task("email.send")
+app = App("worker", backend=backend)
+email = app.server("email")
+
+@email.task("send")
 async def send_email(user_id: int) -> None:
     ...
 
-await app.send("worker.email.send", (), {"user_id": 1})
+await app.init()
+await email.consume(mode="task")
+await app.client.send("worker.email.send", (), {"user_id": 1})
 ```
 
-- If no consumer is available, behavior depends on the backend (e.g. `LocalBackend` logs a warning and drops; broker-backed backends may queue according to broker semantics).
-- Handler exceptions and validation failures are logged; no error is returned to the sender.
+- No response payload to the caller.
+- Suitable for asynchronous/background processing.
+- With multiple workers on the same queue, one handles each task.
 
 ## Event
 
-An event is published to a topic and delivered to all matching subscribers. Each app instance has its own event queue.
-
 ```python
-@app.subscribe("user.*")
+app = App("billing", backend=backend)
+server = app.server()
+
+@server.subscribe("user.*")
 def on_user_event(user_id: int) -> None:
     ...
 
-await app.emit("user.created", {"user_id": 1})
+await app.init()
+await server.consume(mode="event")
+await app.client.emit("user.created", {"user_id": 1})
 ```
 
-- Topic patterns support `*` (one segment) and `#` (zero or more segments).
-- Multiple subscribers in the same app for the same topic are all invoked.
-- Subscriber exceptions and validation failures are logged; no response is returned.
+- Topic-based fan-out delivery.
+- Each server has its own event queue; subscriptions on a server are consumed by that server.
+- Supports `*` (single segment) and `#` (zero or more segments) wildcards.
 
 ## Choosing a mode
 
-- Use **RPC** when the caller needs a result, confirmation, or typed error.
-- Use **task** when work should be processed once asynchronously without a reply.
-- Use **event** when multiple independent consumers must react to the same occurrence.
-
-!!! warning "No reply modes"
-    For tasks and events, `send`/`emit` completing means the client-side publish completed (subject to backend behavior), not that handlers succeeded. Use hooks, logging, or out-of-band mechanisms for observability and reliability guarantees.
+- Need a result or success/failure from the handler: **RPC**.
+- Need background execution without a reply, load-balanced across workers: **Task**.
+- Need to notify multiple interested servers/subscribers: **Event**.

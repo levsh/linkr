@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from abc import ABC
-from collections.abc import Awaitable, Callable
-from typing import Any
+from collections.abc import Awaitable, Callable, Sequence
+from typing import Any, TypeVar
 
 from ..models import Message, Request, Response
 
@@ -156,3 +156,122 @@ class WireMiddleware(BaseMiddleware):
             deserialised :class:`Response`.
         """
         return await call_next()
+
+
+T = TypeVar("T")
+Next = Callable[[], Awaitable[T]]
+
+
+def apply_middleware(
+    middlewares: Sequence[Any],
+    handler: Next[T],
+    wrap: Callable[[Any, Next[T]], Next[T]],
+) -> Next[T]:
+    """
+    Compose middlewares around *handler* using the provided wrapper.
+
+    Args:
+        middlewares: Middleware instances in outer-to-inner registration order.
+        handler: Innermost handler/callable.
+        wrap: Function that wraps a middleware around the next callable.
+
+    Returns:
+        The composed callable with all middlewares applied.
+    """
+    for mw in reversed(middlewares):
+        handler = wrap(mw, handler)
+    return handler
+
+
+def wrap_app_client(
+    mw: AppMiddleware,
+    nxt: Next[Response | None],
+    request: Request,
+    context: dict[str, Any],
+) -> Next[Response | None]:
+    """
+    Wrap a client pipeline step with an app-level middleware dispatch.
+
+    Args:
+        mw: App-level middleware instance.
+        nxt: Next callable in the pipeline.
+        request: Outgoing request object.
+        context: Backend-specific publish/context metadata.
+
+    Returns:
+        Callable that executes the middleware dispatch.
+    """
+    async def call() -> Response | None:
+        return await mw.dispatch_client(nxt, request, context=context)
+
+    return call
+
+
+def wrap_wire_client(
+    mw: WireMiddleware,
+    nxt: Next[Message | None],
+    request: Request,
+    message: Message,
+    context: dict[str, Any],
+) -> Next[Message | None]:
+    """
+    Wrap a client wire pipeline step with a wire-level middleware dispatch.
+
+    Args:
+        mw: Wire-level middleware instance.
+        nxt: Next callable in the pipeline.
+        request: Outgoing request object.
+        message: Serialized request message.
+        context: Backend-specific publish/context metadata.
+
+    Returns:
+        Callable that executes the middleware dispatch.
+    """
+    async def call() -> Message | None:
+        return await mw.dispatch_client(nxt, request, message, context=context)
+
+    return call
+
+
+def wrap_app_server(
+    mw: AppMiddleware,
+    nxt: Next[Response | None],
+    request: Request,
+) -> Next[Response | None]:
+    """
+    Wrap a server dispatch step with an app-level middleware dispatch.
+
+    Args:
+        mw: App-level middleware instance.
+        nxt: Next callable in the pipeline.
+        request: Incoming request object.
+
+    Returns:
+        Callable that executes the middleware dispatch.
+    """
+    async def call() -> Response | None:
+        return await mw.dispatch_server(nxt, request)
+
+    return call
+
+
+def wrap_wire_server(
+    mw: WireMiddleware,
+    nxt: Next[tuple[Message, Response] | tuple[None, None]],
+    message: Message,
+) -> Next[tuple[Message, Response] | tuple[None, None]]:
+    """
+    Wrap a server wire pipeline step with a wire-level middleware dispatch.
+
+    Args:
+        mw: Wire-level middleware instance.
+        nxt: Next callable in the pipeline.
+        message: Serialized incoming request message.
+
+    Returns:
+        Callable that executes the middleware dispatch.
+    """
+    async def call() -> tuple[Message, Response] | tuple[None, None]:
+        return await mw.dispatch_server(nxt, message)
+
+    return call

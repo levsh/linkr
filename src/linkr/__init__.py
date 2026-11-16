@@ -1,6 +1,6 @@
 import importlib.metadata
 
-from linkr.app import App, RPCRouter, TaskRouter, get_current_request
+from linkr.app import App
 from linkr.backends import Backend, Mode
 from linkr.backends.local import LocalBackend
 from linkr.di import Depends
@@ -22,14 +22,14 @@ from linkr.hooks import (
 from linkr.middleware import AppMiddleware, BaseMiddleware, WireMiddleware
 from linkr.models import ErrorInfo, HandlerInfo, Message, QueueOptions, Request, RequestType, Response, ResponseType
 from linkr.serializer import JsonRpcSerializer, JsonSerializer, Serializer
+from linkr.server import Server, get_current_request
 
 __all__ = [
     "Depends",
     "get_current_request",
     "HandlerInfo",
     "App",
-    "RPCRouter",
-    "TaskRouter",
+    "Server",
     "ErrorCode",
     "ErrorInfo",
     "RPCError",

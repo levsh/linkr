@@ -83,108 +83,113 @@ class TestDependsMarker:
 
 
 class TestDiWithApp:
-    async def test_resolves_singleton(self, app):
-        @app.method("ping")
+    async def test_resolves_singleton(self, app, server):
+        @server.method("ping")
         def ping(db: Depends[Database, make_db_factory()]) -> str:
             return db.url
 
-        await app.consume()
+        await server.consume()
         assert await call(app, "ping") == "postgres://db"
         assert await call(app, "ping") == "postgres://db"
 
-    async def test_transient_factory(self, app):
-        @app.method("get_db")
+    async def test_transient_factory(self, app, server):
+        @server.method("get_db")
         def get_db(db: Depends[Database, make_transient_db_factory()]) -> str:
             return db.url
 
-        await app.consume()
+        await server.consume()
         assert await call(app, "get_db") == "db-1"
         assert await call(app, "get_db") == "db-2"
         assert await call(app, "get_db") == "db-3"
 
-    async def test_with_rpc_args(self, app):
-        @app.method("greet")
+    async def test_with_rpc_args(self, app, server):
+        @server.method("greet")
         def greet(name: str, db: Depends[Database, make_db_factory()]) -> str:
             return f"Hello {name} from {db.url}"
 
-        await app.consume()
+        await server.consume()
         assert await call(app, "greet", name="World") == "Hello World from postgres://db"
 
-    async def test_kwds_override(self, app):
-        @app.method("check")
+    async def test_kwds_override(self, app, server):
+        @server.method("check")
         def check(db: Depends[Database, make_db_factory()]) -> str:
             return f"DI:{db.url}"
 
-        await app.consume()
+        await server.consume()
         assert await call(app, "check") == "DI:postgres://db"
         # Test that explicit kwds are passed through (not overriding DI)
         # The handler's db parameter is typed as Database, so passing a string
         # would fail type validation. This test verifies DI runs before kwds merge.
         assert await call(app, "check") == "DI:postgres://db"
 
-    async def test_no_deps_still_works(self, app):
-        @app.method("ping")
+    async def test_no_deps_still_works(self, app, server):
+        @server.method("ping")
         def ping() -> str:
             return "pong"
 
-        await app.consume()
+        await server.consume()
         assert await call(app, "ping") == "pong"
 
-    async def test_handler_without_annotation(self, app):
-        @app.method("echo")
+    async def test_handler_without_annotation(self, app, server):
+        @server.method("echo")
         def echo(value: str) -> str:
             return value
 
-        await app.consume()
+        await server.consume()
         assert await call(app, "echo", value="hello") == "hello"
 
-    async def test_multiple_deps(self, app):
-        @app.method("status")
+    async def test_multiple_deps(self, app, server):
+        @server.method("status")
         def status(db: Depends[Database, make_db_factory()], cfg: Depends[Config, make_cfg_factory()]) -> str:
             return f"{db.url}/{cfg.env}"
 
-        await app.consume()
+        await server.consume()
         assert await call(app, "status") == "postgres://db/production"
 
 
 class TestScopedDependency:
-    async def test_scoped_dependency_in_app(self, app):
-        @app.method("get_id")
+    async def test_scoped_dependency_in_app(self, app, server):
+        @server.method("get_id")
         def get_id(ctx: Depends[RequestContext, scoped_factory]) -> str:
             return ctx.req_id
 
-        await app.consume()
+        await server.consume()
         result = await call(app, "get_id")
         assert isinstance(result, str)
         assert result
 
-    async def test_scoped_dependency_cached_per_request(self, app):
-        @app.method("same")
+    async def test_scoped_dependency_cached_per_request(self, app, server):
+        @server.method("same")
         def same(
             first: Depends[RequestContext, scoped_factory],
             second: Depends[RequestContext, scoped_factory],
         ) -> bool:
             return first is second
 
-        await app.consume()
+        await server.consume()
         assert await call(app, "same") is True
 
 
-class TestErrorHandling:
-    async def test_missing_factory_raises(self, app):
-        @app.method("fail")
-        def fail(db: Depends[Database]) -> str:  # no factory
-            return db.url
+class NeedsArgDep:
+    def __init__(self, x: str) -> None:
+        self.x = x
 
-        await app.consume()
+
+class TestErrorHandling:
+    async def test_missing_factory_raises(self, app, server):
+        @server.method("fail")
+        def fail(db: Depends[NeedsArgDep]) -> str:  # no factory, not default-constructible
+            return db.x
+
+        await server.consume()
         with pytest.raises(RPCError, match="requires inline factory"):
             await call(app, "fail")
 
-    async def test_factory_exception_propagates(self, app):
-        @app.method("fail")
+    async def test_factory_exception_propagates(self, app, server):
+        @server.method("fail")
         def fail(db: Depends[Database, failing_factory]) -> str:
             return db.url
 
-        await app.consume()
+        await server.consume()
         with pytest.raises(RPCError, match="factory failed"):
             await call(app, "fail")

@@ -4,17 +4,35 @@ Middleware wraps client and/or server pipelines using an onion (`call_next`) pat
 
 ## Adding middleware
 
-```python
-from linkr import App, LocalBackend
-from linkr.middleware.gzip import GzipMiddleware
+Pass middleware to `App` via the `middlewares` parameter (a list of `AppMiddleware` and/or `WireMiddleware` instances):
 
-app = App("orders", backend=LocalBackend())
-app.add_middleware(GzipMiddleware())
-app.add_middleware(MyAppMiddleware())
+```python
+from collections.abc import Awaitable, Callable
+from typing import Any
+
+from linkr import App, AppMiddleware, LocalBackend
+from linkr.middleware.gzip import GzipMiddleware
+from linkr.models import Request, Response
+
+
+class LoggingMiddleware(AppMiddleware):
+    async def dispatch_server(
+        self,
+        call_next: Callable[[], Awaitable[Response | None]],
+        request: Request,
+    ) -> Response | None:
+        return await call_next()
+
+
+app = App(
+    "orders",
+    backend=LocalBackend(),
+    middlewares=[GzipMiddleware(), LoggingMiddleware()],
+)
 ```
 
-- `add_middleware` accepts `AppMiddleware` or `WireMiddleware`.
-- Execution follows registration order (outermost to innermost on the way in, reverse on the way out).
+- `middlewares` accepts `AppMiddleware` and `WireMiddleware` instances.
+- Execution follows list order (outermost to innermost on the way in, reverse on the way out). Middleware is initialized/closed with the app (`App.init()` / `App.close()`).
 
 ## App-level middleware
 
@@ -101,9 +119,10 @@ Mutate `request_message`/`response_message` in place to affect wire data and hea
 ## Built-in: `GzipMiddleware`
 
 ```python
+from linkr import App, LocalBackend
 from linkr.middleware.gzip import GzipMiddleware
 
-app.add_middleware(GzipMiddleware(min_size=1024))
+app = App("app", backend=LocalBackend(), middlewares=[GzipMiddleware(min_size=1024)])
 ```
 
 - Compresses request/response payloads when size is at least `min_size` (default 1024 bytes).

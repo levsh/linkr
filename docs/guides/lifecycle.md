@@ -1,6 +1,6 @@
 # Lifecycle
 
-`App` manages backend/middleware initialization, consumer registration, and shutdown.
+`App` manages backend/middleware initialization and shutdown. `Server` manages handler registration and consuming per scope/mode.
 
 ## Initialization and shutdown
 
@@ -18,122 +18,79 @@ Or use the async context manager:
 
 ```python
 async with App("orders", backend=backend) as app:
-    await app.consume()
+    server = app.server()
+    await server.consume()
     ...
 ```
 
-- `init()` initializes the backend and middleware.
-- `close(timeout=None)` stops consuming, closes middleware and backend, and marks the app closed. Operations after close raise `RuntimeError`.
+- `app.init()` initializes the backend and middleware.
+- `app.close(timeout=None)` stops consuming on all servers, closes middleware and backend, and marks the app closed. The `timeout` argument is reserved for future graceful-shutdown control and is currently unused. Operations after close raise `RuntimeError`.
+- There are no global `app.consume()` / `app.stop_consume()` methods.
 
-## Named queue/router configuration and consume
+## Servers and queue scopes
 
-Per-queue transport options for **named RPC/task queues** are configured with
-`app.rpc_router(path, *, options=[...])` / `app.task_router(path, *, options=[...])`
-and applied when the queue starts consuming. `path` is required and targets
-queue `app.name.<path>`.
-
-The default app queue (`app.name`) and event queues are not configured via
-routers; they use backend-static defaults.
+Create servers from an app:
 
 ```python
-rpc = app.rpc_router("serviceA", options=[...])      # named RPC queue (orders.serviceA)
-jobs = app.task_router("jobs", options=[...])        # named task queue (orders.jobs)
-
-@rpc("ping")
-def ping() -> str:
-    return "pong"
+root = app.server()                              # base queue: "orders"
+svc = app.server("serviceA")                     # base queue: "orders.serviceA"
+email = app.server("email", task_options=[...])  # named task queue with options
 ```
 
-Rules:
+- `path=None` (or omitted) is the root server with base queue `app.name`.
+- `path="group"` creates/returns a server bound to queue `app.name.group`.
+- Repeated `app.server(path, ...)` with the same path returns the same server if options match; conflicting options raise `ValueError`.
+- Handler names registered on a server are local leaf names (must not contain `.`). The queue is determined by the server scope.
 
-- Declare/configure a named queue **before** `consume_*` starts it. Configuring or changing options for an already-consuming queue raises `RuntimeError`.
-- The configuration unit is the named queue `(mode, app.name.<path>)` (shared by all handlers on that queue). Re-declaring the same queue with identical options is idempotent; different options raise `ValueError`. Duplicate option types in one options list are rejected.
-- `options=None` does not change an existing configuration (can be used to obtain a router handle). With no declaration, backend defaults apply for that queue.
-- `consume_*` passes a named rpc/task queue's configured options to the backend (`consume_rpc/task(..., options=...)`); backends select option types they understand and ignore the rest. Event consumers are started without app-level queue options.
-- A stopped queue can be consumed again; `consume_*` re-reads the current queue configuration.
+## Register handlers, then consume
 
-## Starting consumers
-
-Register handlers and configure named queues first, then start consuming:
+Register handlers on servers, then start consuming on each server:
 
 ```python
-@rpc("ping")
+root = app.server()
+email = app.server("email")
+
+@root.method("ping")
 def ping() -> str:
     return "pong"
 
-await app.consume()        # RPC + tasks + events
-# or selectively:
-await app.consume_rpc()
-await app.consume_tasks()
-await app.consume_events()
+@email.task("send")
+async def send(user_id: int) -> None:
+    ...
+
+await app.init()
+await root.consume()              # rpc + task + event for this server (as applicable)
+await email.consume(mode="task")  # only task mode for this server
 ```
 
-- `consume_rpc()` starts consumers for all RPC queues required by registered methods (including the app default queue when methods exist).
-- `consume_tasks()` starts consumers for registered task queues.
-- `consume_events()` starts consuming on this instance's event queue when subscriptions exist.
-- Calling consume on a closed app raises `RuntimeError`. Already-consumed queues are not re-registered.
+- `server.consume(mode=None)` starts consuming for all modes in this server that have registrations; `mode` can be `"rpc"`, `"task"`, or `"event"`.
+- Consuming is idempotent for modes/queues already consuming.
+- Consuming on a closed app raises `RuntimeError`.
 
-## Stopping consumers
+## Stopping and resuming
 
 ```python
-await app.stop_consume()                 # stop all modes
+server = app.server()
 
-await app.stop_consume_rpc()             # stop all RPC consumers
-await app.stop_consume_rpc("ping")       # stop a specific RPC method
-await app.stop_consume_rpc("group.ping") # grouped method
-
-await app.stop_consume_tasks()           # stop all task consumers
-await app.stop_consume_tasks("email.send")
-
-await app.stop_consume_events()          # stop all event consumers and subscriptions
-await app.stop_consume_events("user.created")
+await server.stop_consume()             # pause all modes for this server
+await server.stop_consume(mode="rpc")   # pause RPC only
+await server.stop_consume(mode="task")
+await server.stop_consume(mode="event")
 ```
 
-### Granular stop semantics
+- `server.stop_consume(...)` pauses consuming for the specified mode(s) on that server.
+- Registrations (handlers/subscriptions) are **not removed**; call `server.consume(...)` again to resume listening.
+- Stopping is idempotent. Each server is controlled independently.
 
-`App` decides what to stop; the backend executes transport commands.
+## Events are per-server
 
-**RPC / Task (by handler name):**
-
-- `method`/`task=None`: stop all consumers of that mode.
-- Specific name: removes the handler from the app registry.
-  - If other handlers of the same mode still share the same queue, the backend queue consumer **remains active**.
-  - If it was the last handler on that queue, the app instructs the backend to stop that queue consumer.
-- Unknown handler name raises `ValueError`.
-
-**Events (by topic pattern):**
-
-- `topic=None`: stops event consuming and clears subscriptions.
-- Specific `topic`: removes that subscription.
-  - If other subscriptions remain, only that topic binding/subscription is removed (backend queue consumer stays active).
-  - If no subscriptions remain, the event queue consumer is stopped.
-- Unknown topic pattern raises `ValueError`.
-
-### Backend stop operations
-
-Backends implement execution commands:
-
-```python
-await backend.stop_consume_rpc(queue=None)
-await backend.stop_consume_tasks(queue=None)
-await backend.stop_consume_events(queue=None, topic=None)
-```
-
-- `queue=None` — stop all consumers of the mode (for this backend instance).
-- `queue=<name>` — stop the specified queue consumer.
-- `queue=<event_queue>, topic=<pattern>` — remove only that topic subscription.
-
-`Backend.consume_rpc/task` accept an optional `options` argument for per-queue backend configuration of named rpc/task queues. `Backend.consume_event` receives `(queue, topics, handler)` and uses backend-static configuration. `Backend.stop_consume(mode=None)` exists as a deprecated compatibility shim.
-
-## Re-consuming
-
-After stopping specific handlers/queues (or all), you can register new handlers and call `consume_*()`/`consume()` again to resume consuming as needed (subject to current registrations and app state).
+Each server has its own event queue (e.g. `<server.queue_base>.<app.instance_id>`). Subscriptions registered on a server are consumed only by that server's event consumer. Publishing (`app.client.emit`) sends to the topic; servers with matching subscriptions on their own queues receive the event.
 
 ## Hooks
 
 Lifecycle operations emit hook events:
 
-- `on_consume_start` — per queue/mode when consuming starts
-- `on_consume_stop` — with reasons such as `all`, `queue_drained`, or `topic_unsubscribed`
+- `on_consume_start` — when consuming starts for a server/mode/queue
+- `on_consume_stop` — when consuming stops for a server/mode/queue
 
 See [Hooks](hooks.md).

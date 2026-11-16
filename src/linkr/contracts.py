@@ -3,7 +3,7 @@ from __future__ import annotations
 import html
 import inspect
 import json
-from collections.abc import Callable, ItemsView
+from collections.abc import Callable
 from datetime import UTC, datetime
 from types import NoneType
 from typing import Annotated, Any, Literal, get_type_hints
@@ -197,11 +197,27 @@ class AppContract(BaseModel):
         }
 
     def to_json(self, *, indent: int | None = 2) -> str:
-        """Serialize the contract to JSON using the stable wire shape."""
+        """
+        Serialize the contract to JSON using the stable wire shape.
+
+        Args:
+            indent: JSON indentation level.
+
+        Returns:
+            A JSON string representing the contract.
+        """
         return json.dumps(self.to_dict(), indent=indent, default=ContractBuilder.json_default)
 
     def to_html(self, *, title: str | None = None) -> str:
-        """Render the contract as a self-contained HTML page."""
+        """
+        Render the contract as a self-contained HTML page.
+
+        Args:
+            title: Optional document title.
+
+        Returns:
+            An HTML document string representing the contract.
+        """
         return render_contract_html(self, title=title)
 
 
@@ -218,6 +234,14 @@ class ContractBuilder:
         include: set[str] | None = None,
         include_internal: bool = False,
     ) -> None:
+        """
+        Create a contract builder.
+
+        Args:
+            app: Application instance to describe.
+            include: Sections to include (``methods``, ``tasks``, ``events``).
+            include_internal: Whether to include internal handlers/topics.
+        """
         self._app = app
         self._include = include or {"methods", "tasks", "events"}
         self._include_internal = include_internal
@@ -237,9 +261,7 @@ class ContractBuilder:
 
     def _build_methods(self) -> dict[str, RpcMethodContract]:
         methods: dict[str, RpcMethodContract] = {}
-        for (queue, leaf), info in sorted(
-            self._iter_handlers("_rpc_handlers"), key=lambda item: (item[0][0], item[0][1])
-        ):
+        for (queue, leaf), info in sorted(self._iter_rpc_handlers(), key=lambda item: (item[0][0], item[0][1])):
             fq_name = f"{queue}.{leaf}"
             if not self._include_internal and self._is_internal_name(fq_name):
                 continue
@@ -248,9 +270,7 @@ class ContractBuilder:
 
     def _build_tasks(self) -> dict[str, TaskMethodContract]:
         tasks: dict[str, TaskMethodContract] = {}
-        for (queue, leaf), info in sorted(
-            self._iter_handlers("_task_handlers"), key=lambda item: (item[0][0], item[0][1])
-        ):
+        for (queue, leaf), info in sorted(self._iter_task_handlers(), key=lambda item: (item[0][0], item[0][1])):
             fq_name = f"{queue}.{leaf}"
             if not self._include_internal and self._is_internal_name(fq_name):
                 continue
@@ -259,22 +279,22 @@ class ContractBuilder:
 
     def _build_events(self) -> dict[str, EventContract]:
         events: dict[str, EventContract] = {}
-        subscribers_by_pattern = getattr(self._app, "_subscribers", {})
-        app_name = getattr(self._app, "name", "")
 
-        grouped: dict[str, list[HandlerInfo]] = {}
-        for _compiled, infos in subscribers_by_pattern.items():
-            for info in infos:
-                grouped.setdefault(info.name, []).append(info)
+        grouped: dict[str, list[tuple[HandlerInfo, str]]] = {}
+        for server in self._iter_servers():
+            queue_template = f"{server.queue_base}.<instance_id>"
+            for topic, infos in server.subscriptions.items():
+                for info in infos:
+                    grouped.setdefault(topic, []).append((info, queue_template))
 
         for topic in sorted(grouped):
             subscribers: list[EventSubscriberContract] = []
-            for info in grouped[topic]:
+            for info, queue_template in grouped[topic]:
                 fn = inspect.unwrap(info.fn)
                 params, _args_schema, kwds_schema = self._build_input(info, fn, is_event=True)
                 subscribers.append(
                     EventSubscriberContract(
-                        queue_template=f"{app_name}.<instance_id>",
+                        queue_template=queue_template,
                         handler=getattr(info.fn, "__name__", info.name),
                         description=inspect.getdoc(fn),
                         payload=EventPayloadContract(params=params, kwds_schema=kwds_schema),
@@ -514,9 +534,31 @@ class ContractBuilder:
             i += 1
         return f"{key}_{i}"
 
-    def _iter_handlers(self, attr: str) -> ItemsView[tuple[str, str], HandlerInfo]:
-        handlers = getattr(self._app, attr, {})
-        return handlers.items()
+    def _iter_servers(self) -> list[Any]:
+        servers = getattr(self._app, "_servers", None)
+        if servers is None:
+            return [self._app]
+        if isinstance(servers, dict):
+            return list(servers.values())
+        return list(servers)
+
+    def _iter_rpc_handlers(self) -> list[tuple[tuple[str, str], HandlerInfo]]:
+        items: list[tuple[tuple[str, str], HandlerInfo]] = []
+        for server in self._iter_servers():
+            handlers = getattr(server, "_rpc_handlers", None)
+            if handlers is None:
+                handlers = getattr(self._app, "_rpc_handlers", {})
+            items.extend(handlers.items())
+        return items
+
+    def _iter_task_handlers(self) -> list[tuple[tuple[str, str], HandlerInfo]]:
+        items: list[tuple[tuple[str, str], HandlerInfo]] = []
+        for server in self._iter_servers():
+            handlers = getattr(server, "_task_handlers", None)
+            if handlers is None:
+                handlers = getattr(self._app, "_task_handlers", {})
+            items.extend(handlers.items())
+        return items
 
     def _is_internal_name(self, _name: str) -> bool:
         # Reserved for future internal handlers; respects include_internal flag.
@@ -595,7 +637,15 @@ class ContractBuilder:
 
     @staticmethod
     def json_default(value: Any) -> Any:
-        """JSON fallback serializer for contract values."""
+        """
+        JSON fallback serializer for contract values.
+
+        Args:
+            value: Value that could not be serialized by the default encoder.
+
+        Returns:
+            A JSON-serializable representation of *value*.
+        """
         if isinstance(value, datetime):
             if value.tzinfo is None:
                 value = value.replace(tzinfo=UTC)
@@ -614,6 +664,13 @@ class HtmlContractRenderer:
     """Render an :class:`~linkr.contracts.AppContract` as a self-contained HTML page."""
 
     def __init__(self, contract: AppContract | dict[str, Any], *, title: str | None = None) -> None:
+        """
+        Create an HTML renderer for a contract.
+
+        Args:
+            contract: Contract model or dictionary.
+            title: Optional page title.
+        """
         self.contract_data = contract.to_dict() if isinstance(contract, AppContract) else dict(contract)
         self.title = title or f"Contract — {self.contract_data.get('app') or 'app'}"
 
@@ -936,7 +993,16 @@ function filterOps(query) {
 
 
 def render_contract_html(contract: AppContract | dict[str, Any], *, title: str | None = None) -> str:
-    """Render a contract model or contract dictionary as a self-contained HTML page."""
+    """
+    Render a contract model or contract dictionary as a self-contained HTML page.
+
+    Args:
+        contract: Contract model or dictionary to render.
+        title: Optional document title.
+
+    Returns:
+        An HTML document string representing the contract.
+    """
     return HtmlContractRenderer(contract, title=title).render()
 
 
@@ -946,10 +1012,30 @@ def describe_app(
     include: set[str] | None = None,
     include_internal: bool = False,
 ) -> AppContract:
-    """Build and return an :class:`AppContract` model for *app*."""
+    """
+    Build and return an :class:`AppContract` model for *app*.
+
+    Args:
+        app: Application instance to describe.
+        include: Contract sections to include (``methods``, ``tasks``, ``events``).
+        include_internal: Whether to include internal handlers/topics.
+
+    Returns:
+        The generated application contract.
+    """
     return ContractBuilder(app, include=include, include_internal=include_internal).build()
 
 
 def describe_app_json(app: Any, *, indent: int | None = 2, **kwargs: Any) -> str:
-    """Serialize :func:`describe_app` to a JSON string."""
+    """
+    Serialize :func:`describe_app` to a JSON string.
+
+    Args:
+        app: Application instance to describe.
+        indent: JSON indentation level.
+        **kwargs: Additional arguments forwarded to :func:`describe_app`.
+
+    Returns:
+        A JSON string representing the application contract.
+    """
     return describe_app(app, **kwargs).to_json(indent=indent)

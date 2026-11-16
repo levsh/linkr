@@ -1,21 +1,16 @@
 # linkr
 
-`linkr` is an async messaging framework for Python with three delivery modes: **RPC**, **task**, and **event**.
+Async messaging framework with three delivery modes: **RPC**, **Task**, and **Event**.
 
-It provides a single application model (`App`) for registering handlers, sending messages, and composing middleware, serializers, and hooks, with pluggable backends for transport.
+`linkr` provides a unified `App` (lifecycle, hooks, middleware, client API) and per-scope `Server` instances (handler registration and consuming) over pluggable backends (in-process and RabbitMQ).
 
-## Key features
+## Features
 
-- **Three delivery modes**
-    - RPC: one consumer handles a call and returns a result.
-    - Task: one consumer handles a job, no result (fire-and-forget).
-    - Event: every matching subscriber receives the event (fan-out).
-- **Backend abstraction**: in-process `LocalBackend` (no external broker) and `RmqBackend` for RabbitMQ.
-- **Middleware**: app-level (`Request`/`Response`) and wire-level (raw bytes/headers) with onion-style dispatch.
-- **Hooks**: observer events for consume lifecycle, client publish/response, server receive/dispatch, handler execution, and dropped messages.
-- **Serialization**: `JsonSerializer` (`linkr1.0`) by default, `JsonRpcSerializer` (`jsonrpc2.0`, RPC-only), server-side auto-detection when multiple serializers are configured.
-- **Dependency injection**: `Depends[Type, factory]` with per-call resolution and `get_current_request()`.
-- **Typed errors**: structured `RPCError`/`ErrorCode` and customizable exception handlers.
+- **Delivery modes:** request/response RPC, fire-and-forget tasks, and fan-out pub/sub events
+- **Server scopes:** per-server queues and independent consume/stop control by mode
+- **Backends:** `LocalBackend` (in-process) and `RmqBackend` (RabbitMQ via `aio-pika`)
+- **Extensibility:** app/wire middleware, lifecycle and request hooks, serializers (Linkr JSON and JSON-RPC 2.0), dependency injection, argument validation
+- **Contracts:** runtime introspection and export (`describe`, JSON/HTML)
 
 ## Quick example
 
@@ -26,15 +21,16 @@ from linkr import App, LocalBackend
 
 
 async def main() -> None:
-    backend = LocalBackend()
+    async with App("orders", backend=LocalBackend()) as app:
+        server = app.server()
 
-    async with App("orders", backend=backend) as app:
-        @app.method("add")
+        @server.method("add")
         def add(x: int, y: int) -> int:
             return x + y
 
-        await app.consume()
-        print(await app.call("orders.add", (2, 3), {}))  # 5
+        await server.consume(mode="rpc")
+        result = await app.client.call("orders.add", (2, 3), {})
+        print(result)  # 5
 
 
 asyncio.run(main())
@@ -42,10 +38,9 @@ asyncio.run(main())
 
 ## Where to go next
 
-- [Installation](getting-started/installation.md) and [Quickstart](getting-started/quickstart.md)
-- [Concepts](concepts/overview.md) for delivery modes, routing, and message model
-- [Guides](guides/rpc.md) for RPC, tasks, events, lifecycle, middleware, hooks, and more
-- [Backends](backends/overview.md) and [Reference](reference/api.md) for contracts and API details
-
-!!! note
-    `linkr` requires Python 3.11+.
+- [Installation](getting-started/installation.md)
+- [Quickstart](getting-started/quickstart.md)
+- [Delivery modes](concepts/delivery-modes.md)
+- [Routing and naming](concepts/routing-and-naming.md)
+- [RabbitMQ backend](backends/rabbitmq.md)
+- [API reference](reference/api.md)

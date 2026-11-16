@@ -13,7 +13,7 @@ All exceptions raised by linkr derive from `LinkrError`:
 from linkr import LinkrError, RPCError, RequestError
 
 try:
-    await app.call("orders.missing", (), {})
+    await app.client.call("orders.missing", (), {})
 except RPCError as exc:
     print(exc.error_code)     # e.g. "MethodNotFound"
 except RequestError as exc:
@@ -30,7 +30,7 @@ RPC failures raised to callers use `RPCError`:
 from linkr import ErrorCode, RPCError
 
 try:
-    await app.call("orders.missing", (), {})
+    await app.client.call("orders.missing", (), {})
 except RPCError as exc:
     print(exc.error_code)     # e.g. "MethodNotFound"
     print(exc.error_message)
@@ -54,12 +54,13 @@ Type validation can be enabled globally or per handler:
 from linkr import App, LocalBackend
 
 app = App("orders", backend=LocalBackend(), validate_types=True)
+server = app.server()
 
-@app.method("add", validate_types=True)
+@server.method("add", validate_types=True)
 def add(x: int, y: int) -> int:
     return x + y
 
-@app.task("process", validate_types=False)
+@server.task("process", validate_types=False)
 def process(data: dict) -> None:
     ...
 ```
@@ -87,7 +88,7 @@ Registered handlers are used when converting server-side exceptions to RPC error
 - Client/RPC call timeout behavior can raise `RPCError` with `ErrorCode.TIMEOUT` when a response is not received in time.
 - Handler execution may also time out (surfaced as timeout errors per mode).
 
-Configure defaults via `App(..., timeout=..., ttl=..., rttl=...)` and per-call parameters where supported (see [Client API](client-api.md)).
+Configure defaults via `App(..., rpc_timeout=..., rpc_ttl=..., rpc_rttl=..., task_timeout=..., task_ttl=..., event_ttl=...)` and per-call parameters where supported (see [Client API](client-api.md)).
 
 ## Tasks and events
 
@@ -102,23 +103,24 @@ Use [hooks](hooks.md) and application logging for monitoring and reaction (metri
 ## Example
 
 ```python
-from linkr import App, ErrorCode, LocalBackend, RPCError
+from linkr import App, LocalBackend, RPCError
 
 app = App("svc", backend=LocalBackend(), validate_types=True)
+server = app.server()
 
 @app.exception_handler(PermissionError)
 def on_permission(exc: Exception) -> tuple[str, str]:
     return ("PermissionDenied", str(exc))
 
-@app.method("secure")
+@server.method("secure")
 def secure() -> None:
     raise PermissionError("denied")
 
 async def main() -> None:
     async with app:
-        await app.consume()
+        await server.consume(mode="rpc")
         try:
-            await app.call("svc.secure", (), {})
+            await app.client.call("svc.secure", (), {})
         except RPCError as exc:
             assert exc.error_code == "PermissionDenied"
 ```

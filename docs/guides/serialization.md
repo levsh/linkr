@@ -59,7 +59,7 @@ app = App(
 - Select a specific serializer per call with `serializer="<name>"`:
 
 ```python
-await app.call("orders.ping", (), {}, serializer="jsonrpc2.0")
+await app.client.call("orders.ping", (), {}, serializer="jsonrpc2.0")
 ```
 
 !!! warning "Mode compatibility"
