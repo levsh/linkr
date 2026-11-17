@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from ..models import Message
+from ..models import HealthStatus, Message
 from ..utils import topic_to_regex
 from . import Backend, Handler
 
@@ -51,15 +51,28 @@ class LocalBackend(Backend):
                 backend routes by queue name, not by backend name.
         """
         self.name = name or "local"
+        self._initialized = False
+        self._closed = False
 
     async def init(self) -> None:
-        """No-op for local backend."""
+        """Initialize local backend state."""
+        self._initialized = True
+        self._closed = False
 
     async def close(self) -> None:
         """Unregister all consumers owned by this backend instance."""
+        self._closed = True
+        self._initialized = False
         await self.stop_consume_rpc()
         await self.stop_consume_tasks()
         await self.stop_consume_events()
+
+    async def healthcheck(self) -> HealthStatus:
+        """Return backend readiness and health status."""
+        ready = self._initialized and not self._closed
+        if not ready:
+            return HealthStatus(ready=False, health=None)
+        return HealthStatus(ready=True, health=True)
 
     async def consume_rpc(
         self,

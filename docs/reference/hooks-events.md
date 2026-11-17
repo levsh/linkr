@@ -25,7 +25,7 @@ Emitted when consuming starts for a queue.
 | `topic` | `str \| None` | Event topic pattern when applicable |
 | `reason` | `"stopped" \| "all" \| "queue_drained" \| "topic_unsubscribed"` | Stop reason (`ConsumeStopReason`) |
 
-- `stopped`: consuming stopped for the server/mode/queue (emitted by `Server.stop_consume`)
+- `stopped`: consuming stopped for the mode server/queue (emitted by `server.stop_consume()`)
 - `all`, `queue_drained`, `topic_unsubscribed`: additional reason values defined by the hook type
 
 ## Client-side

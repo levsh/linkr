@@ -26,14 +26,14 @@ backend = RmqBackend(
 )
 
 app = App("orders", backend=backend)
-server = app.server()
+rpc = app.rpc()
 
-@server.method("ping")
+@rpc.method("ping")
 def ping() -> str:
     return "pong"
 
 await app.init()
-await server.consume(mode="rpc")
+await rpc.consume()
 ```
 
 ## Configuration
@@ -49,7 +49,7 @@ await server.consume(mode="rpc")
   - **Single exchange (default):** `exchange="linkr"` (str) — one topic exchange named `linkr` shared by RPC, tasks, and events. Queues per logical queue: `linkr.rpc.<queue>`, `linkr.tasks.<queue>`, `linkr.events.<queue>`.
   - **Per-mode exchanges:** `{"rpc": "app.rpc", "task": "app.tasks", "event": "app.events"}` (all keys required) — separate exchange per mode. Exchange types: `rpc=direct`, `task=direct`, `event=topic`. Physical queue names use the same `linkr.<mode>.<queue>` scheme.
 - `exchange_durable` (default `True`): `bool` applied to all exchanges, or per-mode `{"rpc": ..., "task": ..., "event": ...}`.
-- `queue_options` (default `None`): default `RmqQueueOptions` for all modes, or a per-mode mapping for `"rpc"` / `"task"` / `"event"`.
+- `queue_name_template` (default `None`): mode-to-format mapping or callable `(queue, mode) -> name` for physical queue names (default legacy: `linkr.{queue}.rpc`, `linkr.{queue}.tasks`, `linkr.{queue}.events`; `rpc` and `task` names must differ).
 - `heartbeat` (default `30`): AMQP heartbeat in seconds.
 - `blocked_connection_timeout` (default `30`): AMQP blocked-connection timeout in seconds.
 - `results_queue_prefix` (default `"linkr.res."`): prefix for the per-instance RPC callback (reply) queue name.
@@ -63,7 +63,7 @@ await server.consume(mode="rpc")
 
 ## Consuming and stopping
 
-Per-server consuming is managed by `Server.consume(...)` / `Server.stop_consume(...)`, which delegate to backend queue-level operations:
+Per-server consuming is managed by `server.consume()` / `server.stop_consume()` on `RPC`/`Worker`/`Bus` instances, which delegate to backend queue-level operations:
 
 - `consume_rpc(queue, handler, *, options=None)`
 - `consume_task(queue, handler, *, options=None)`
@@ -72,31 +72,41 @@ Per-server consuming is managed by `Server.consume(...)` / `Server.stop_consume(
 - `stop_consume_tasks(queue=None)`
 - `stop_consume_events(queue=None, topic=None)`
 
-`stop_consume_events(queue, topic)` removes a topic binding/subscription without stopping the consumer when other bindings remain (subject to server state). Passing `queue=None` stops all consumers of that mode for this backend instance.
+`stop_consume_events(queue, topic)` removes a topic binding/subscription without stopping the consumer when other bindings remain (subject to backend state). Passing `queue=None` stops all consumers of that mode for this backend instance.
+
+## Healthcheck
+
+`RmqBackend.healthcheck()` returns:
+
+- `HealthStatus(ready=False, health=None)` when the backend is not initialized or is closed.
+- `HealthStatus(ready=True, health=False)` when the AMQP connection/channel is missing or closed, or when a health probe fails.
+- `HealthStatus(ready=True, health=True)` when the connection/channel is alive and either there are no active queues (no consumers currently registered on this backend instance) or every active queue has at least one broker consumer.
+
+Active-queue consumer presence is verified against the broker via passive queue declarations and is performed in parallel for active queues. If broker checks fail or report no consumers for any active queue, health is `False`. The callback/reply queue is not treated as an application consumer queue by this check.
 
 ## Per-server queue options (`RmqQueueOptions`)
 
-Configure broker/consumer options per server when creating it with `app.server(...)`:
+Configure broker/consumer options per server when creating it:
 
 ```python
 from linkr import App
 from linkr.backends.rmq import RmqBackend, RmqQueueOptions
 
 app = App("orders", backend=RmqBackend())
-rpc = app.server("serviceA", rpc_options=[RmqQueueOptions(prefetch_count=5, durable=True)])
-email = app.server(
+rpc = app.rpc("serviceA", options=[RmqQueueOptions(prefetch_count=5, durable=True)])
+email = app.worker(
     "email",
-    task_options=[RmqQueueOptions(
+    options=[RmqQueueOptions(
         prefetch_count=50,
         arguments={"x-max-length": 10_000, "x-dead-letter-exchange": "dlx"},
     )],
 )
-events = app.server(event_options=[RmqQueueOptions(prefetch_count=20)])
+bus = app.bus(options=[RmqQueueOptions(prefetch_count=20)])
 ```
 
-- `rpc_options` / `task_options` / `event_options` apply to the corresponding consume mode for that server.
+- `options` apply to that mode server's consume/queue.
 - `RmqBackend` selects the `RmqQueueOptions` object from the provided options and applies it when consuming.
-- If no per-server option is provided for a mode, backend `queue_options` defaults (or mode defaults) apply.
+- If no per-server option is provided, backend/mode defaults apply for declaration/QoS behavior.
 
 `RmqQueueOptions` fields:
 
@@ -108,7 +118,7 @@ events = app.server(event_options=[RmqQueueOptions(prefetch_count=20)])
 Notes:
 
 - Queue declare parameters must remain compatible with existing broker queues (changing them may raise precondition errors); use a new server/queue path when topology must differ.
-- Event queues are per-server instance queues (separate from RPC/task queues of the same server name).
+- Bus event queues are per-bus instance queues (separate from RPC/task queues of the same app).
 
 ## Example
 
@@ -125,20 +135,20 @@ async def main() -> None:
         backend=RmqBackend(host="localhost", port=5672),
     )
 
-    rpc = app.server("serviceA", rpc_options=[RmqQueueOptions(prefetch_count=5)])
-    root = app.server()
+    rpc = app.rpc("serviceA", options=[RmqQueueOptions(prefetch_count=5)])
+    bus = app.bus()
 
     @rpc.method("ping")
     def ping() -> str:
         return "pong"
 
-    @root.subscribe("user.created")
+    @bus.subscribe("user.created")
     def on_user_created(user_id: int) -> None:
         print("user", user_id)
 
     async with app:
-        await rpc.consume(mode="rpc")
-        await root.consume(mode="event")
+        await rpc.consume()
+        await bus.consume()
         print(await app.client.call("orders.serviceA.ping", (), {}))
         await app.client.emit("user.created", {"user_id": 1})
         await asyncio.sleep(0.1)

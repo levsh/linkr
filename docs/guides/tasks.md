@@ -1,6 +1,6 @@
 # Tasks
 
-Tasks are fire-and-forget handlers: no result is returned to the sender. They run on a `Server` and are sent via `app.client.send(...)`.
+Tasks are fire-and-forget handlers: no result is returned to the sender. They run on a `Worker` server and are sent via `app.client.send(...)`.
 
 ## Registering handlers
 
@@ -8,14 +8,14 @@ Tasks are fire-and-forget handlers: no result is returned to the sender. They ru
 from linkr import App, LocalBackend
 
 app = App("worker", backend=LocalBackend())
-email = app.server("email")
+worker = app.worker("email")
 
-@email.task("send")
+@worker.task("send")
 async def send_email(user_id: int, template: str = "welcome") -> None:
     ...  # perform work
 ```
 
-- `@server.task(name, **options)` registers a task handler with a local leaf name on the server's queue.
+- `@worker.task(name, **options)` registers a task handler with a local leaf name on the server's queue.
 - Supported handler options (see [Configuration](../reference/configuration.md)): e.g. `validate_types`.
 - Sync and async handlers are supported.
 
@@ -23,23 +23,24 @@ async def send_email(user_id: int, template: str = "welcome") -> None:
 
 ```python
 app = App("worker", backend=LocalBackend())
-email = app.server("email")
+worker = app.worker("email")
 
-@email.task("send")
+@worker.task("send")
 async def send_email(user_id: int, template: str = "welcome") -> None:
     ...  # perform work
 
 await app.init()
-await email.consume(mode="task")
+await worker.consume()
 
 await app.client.send("worker.email.send", (), {"user_id": 42})
 await app.client.send("worker.email.send", (42,), {})
 ```
 
-Signature: `app.client.send(task, args: tuple, kwds: dict, *, timeout=None, ttl=None, serializer=None, request_id=None, context=None)`.
+Signature: `app.client.send(task, args: tuple, kwds: dict, *, request_id=None, client_timeout=None, server_timeout=None, ttl=None, serializer=None, context=None)`.
 
 - `task` is the queue-qualified path; the last segment is dispatched as the handler leaf.
 - `send` returns `None` (no response from the handler).
+- `client_timeout` limits client wait for publish; `server_timeout` limits handler execution on the server (sent as `headers["server_timeout"]`). `ttl` is transport lifetime. Negative timeout values are normalized to `0`.
 
 ## Delivery semantics
 
@@ -55,10 +56,10 @@ Signature: `app.client.send(task, args: tuple, kwds: dict, *, timeout=None, ttl=
 ## Consuming
 
 ```python
-server = app.server()
+worker = app.worker("email")
 
-await server.consume(mode="task")      # start task consuming for this server
-await server.stop_consume(mode="task") # pause task consuming (resumable)
+await worker.consume()       # start consuming for this worker
+await worker.stop_consume()  # pause this worker (resumable)
 ```
 
-Consuming is controlled per server and mode (no global app consume/stop).
+Consuming is controlled per worker server (no global app consume/stop, no mode argument).

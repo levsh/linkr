@@ -179,6 +179,14 @@ class TestJsonRpcSerializer:
         assert restored.data["error_code"] == ErrorCode.INTERNAL_ERROR
         assert restored.data["error_details"]["exc_type"] == "ValueError"
 
+    def test_rejects_request_without_id(self, serializer: JsonRpcSerializer):
+        raw = Message(
+            data=b'{"jsonrpc":"2.0","method":"ping"}',
+            headers={"content_type": "application/json", "serializer": "jsonrpc2.0"},
+        )
+        with pytest.raises(ValueError, match="missing id"):
+            serializer.loads_request(raw)
+
     def test_rejects_native_request(self, serializer: JsonRpcSerializer):
         native_raw = JsonSerializer().dumps_request(make_request())
         with pytest.raises(ValueError, match="not a JSON-RPC 2.0 request"):

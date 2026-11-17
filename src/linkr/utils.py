@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
+
+from .models import QueueOptions
 
 
 def topic_to_regex(pattern: str) -> re.Pattern[str]:
@@ -56,3 +59,26 @@ def topic_to_regex(pattern: str) -> re.Pattern[str]:
     regex.append("$")
 
     return re.compile("".join(regex))
+
+
+def normalize_queue_options(
+    options: QueueOptions | Sequence[QueueOptions] | None,
+) -> tuple[QueueOptions, ...] | None:
+    if options is None:
+        return None
+    if isinstance(options, QueueOptions):
+        normalized: tuple[QueueOptions, ...] = (options,)
+    elif isinstance(options, Sequence) and not isinstance(options, (str, bytes)):
+        normalized = tuple(options)
+    else:
+        raise TypeError("options must be a QueueOptions instance, a sequence of QueueOptions, or None")
+    for option in normalized:
+        if not isinstance(option, QueueOptions):
+            raise TypeError("each option must be an instance of QueueOptions")
+    seen: dict[type[QueueOptions], int] = {}
+    for option in normalized:
+        opt_type = type(option)
+        if opt_type in seen:
+            raise ValueError(f"duplicate queue options for backend type: {opt_type.__name__}")
+        seen[opt_type] = 1
+    return normalized

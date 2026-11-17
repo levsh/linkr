@@ -3,15 +3,23 @@ from __future__ import annotations
 import json
 
 from linkr import App, Depends, LocalBackend
-from linkr.contracts import AppContract, RpcMethodContract, TaskMethodContract
+from linkr.contracts import (
+    AppContract,
+    RpcMethodContract,
+    TaskMethodContract,
+    describe_app,
+    describe_app_html,
+    describe_app_json,
+    expose_describe,
+)
 from tests.helpers import call
 
 
 class TestDescribeContracts:
     async def test_describe_basic_rpc_task_event(self, app: App):
-        math = app.server("math")
-        email = app.server("email")
-        root = app.server()
+        math = app.rpc("math")
+        email = app.worker("email")
+        bus = app.bus()
 
         @math.method("add")
         def add(x: int, y: int) -> int:
@@ -22,11 +30,11 @@ class TestDescribeContracts:
         def send_email(user_id: int, template: str = "welcome") -> None:
             return None
 
-        @root.subscribe("user.*")
+        @bus.subscribe("user.*")
         def on_user(user_id: int) -> None:
             return None
 
-        contract = app.describe()
+        contract = describe_app(app)
         assert isinstance(contract, AppContract)
         rpc_model = contract.methods["app.math.add"]
         task_model = contract.tasks["app.email.send"]
@@ -77,54 +85,60 @@ class TestDescribeContracts:
         assert "user_id" in sub["payload"]["kwds_schema"]["properties"]
 
     async def test_describe_excludes_depends_params(self, app: App):
-        server = app.server()
+        server = app.rpc()
+
         @server.method("with_dep")
         def handler(x: int, d: Depends[int, lambda: 1]) -> int:
             return x + d
 
-        spec = app.describe().to_dict()
+        spec = describe_app(app).to_dict()
         rpc = spec["methods"]["app.with_dep"]
         names = [p["name"] for p in rpc["input"]["params"]]
         assert names == ["x"]
         assert "d" not in rpc["input"]["kwds_schema"]["properties"]
 
     async def test_describe_include_filters(self, app: App):
-        server = app.server()
-        @server.method("ping")
+        rpc = app.rpc()
+        worker = app.worker()
+        bus = app.bus()
+
+        @rpc.method("ping")
         def ping() -> str:
             return "pong"
 
-        @server.task("work")
+        @worker.task("work")
         def work() -> None:
             return None
 
-        @server.subscribe("evt")
+        @bus.subscribe("evt")
         def on_evt() -> None:
             return None
 
-        methods_only = app.describe(include={"methods"}).to_dict()
+        methods_only = describe_app(app, include={"methods"}).to_dict()
         assert "app.ping" in methods_only["methods"]
         assert methods_only["tasks"] == {}
         assert methods_only["events"] == {}
 
     async def test_describe_json(self, app: App):
-        server = app.server()
+        server = app.rpc()
+
         @server.method("ping")
         def ping() -> str:
             return "pong"
 
-        text = app.describe_json(indent=2)
+        text = describe_app_json(app, indent=2)
         data = json.loads(text)
         assert data["app"] == "app"
         assert "app.ping" in data["methods"]
 
     async def test_subscriptions_property(self, app: App):
-        server = app.server()
-        @server.subscribe("a.*")
+        bus = app.bus()
+
+        @bus.subscribe("a.*")
         def on_a(x: int) -> None:
             return None
 
-        @server.subscribe("b.#")
+        @bus.subscribe("b.#")
         def on_b(y: str) -> None:
             return None
 
@@ -133,14 +147,14 @@ class TestDescribeContracts:
         assert subs["a.*"][0].request_type == "event"
 
     async def test_expose_describe_rpc(self, app: App):
-        root = app.server()
-        sys_srv = app.server("system")
+        root = app.rpc()
+        sys_srv = app.rpc("system")
 
         @root.method("ping")
         def ping() -> str:
             return "pong"
 
-        app.expose_describe("describe", server=sys_srv)
+        expose_describe(app, "describe", server=sys_srv)
         await root.consume()
         await sys_srv.consume()
 
@@ -151,8 +165,8 @@ class TestDescribeContracts:
         assert "app.system.describe" in spec["methods"]
 
     async def test_expose_describe_default_name(self, app: App):
-        root = app.server()
-        app.expose_describe(server=root)
+        root = app.rpc()
+        expose_describe(app, server=root)
         await root.consume()
 
         spec = await call(app, "app.describe")
@@ -166,13 +180,13 @@ class TestDescribeCrossApp:
         backend = LocalBackend()
         server_app = App("server", backend=backend)
         client = App("client", backend=backend)
-        srv = server_app.server()
+        srv = server_app.rpc()
 
         @srv.method("echo")
         def echo(value: str) -> str:
             return value
 
-        server_app.expose_describe("contracts", server=srv)
+        expose_describe(server_app, "contracts", server=srv)
 
         async with server_app, client:
             await srv.consume()
@@ -184,9 +198,9 @@ class TestDescribeCrossApp:
 
 class TestDescribeHtml:
     async def test_app_describe_html(self, app: App):
-        math = app.server("math")
-        email = app.server("email")
-        root = app.server()
+        math = app.rpc("math")
+        email = app.worker("email")
+        bus = app.bus()
 
         @math.method("add")
         def add(x: int, y: int) -> int:
@@ -197,11 +211,11 @@ class TestDescribeHtml:
         def send_email(user_id: int) -> None:
             return None
 
-        @root.subscribe("user.*")
+        @bus.subscribe("user.*")
         def on_user(user_id: int) -> None:
             return None
 
-        html_doc = app.describe_html()
+        html_doc = describe_app_html(app)
 
         assert html_doc.startswith("<!doctype html>")
         assert "<title>" in html_doc
@@ -216,12 +230,13 @@ class TestDescribeHtml:
         assert "Components (schemas)" in html_doc
 
     async def test_contract_to_html_and_renderer(self, app: App):
-        server = app.server()
+        server = app.rpc()
+
         @server.method("ping")
         def ping() -> str:
             return "pong"
 
-        contract = app.describe()
+        contract = describe_app(app)
         html_from_model = contract.to_html()
         assert "<!doctype html>" in html_from_model
         assert "app.ping" in html_from_model
@@ -234,15 +249,17 @@ class TestDescribeHtml:
         assert "<title>Custom</title>" in html_from_helper
 
     async def test_describe_html_filter(self, app: App):
-        server = app.server()
-        @server.method("ping")
+        rpc = app.rpc()
+        worker = app.worker()
+
+        @rpc.method("ping")
         def ping() -> str:
             return "pong"
 
-        @server.task("work")
+        @worker.task("work")
         def work() -> None:
             return None
 
-        html_doc = app.describe_html(include={"methods"})
+        html_doc = describe_app_html(app, include={"methods"})
         assert "app.ping" in html_doc
         assert "app.work" not in html_doc

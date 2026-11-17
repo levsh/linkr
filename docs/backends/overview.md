@@ -14,14 +14,13 @@ Backends provide the transport for RPC, task, and event delivery. `App` depends 
 A backend implements three delivery capabilities:
 
 - **RPC:** `consume_rpc(queue, handler, *, options=None)`, `request(queue, message, *, context=None) -> Awaitable[Message]`
-  - **Task:** `consume_task(queue, handler, *, options=None)`, `send(queue, message, *, context=None) -> None`
-  - **Event:** `consume_event(queue, topics, handler, *, options=None)`, `emit(topic, message, *, context=None) -> None`
+- **Task:** `consume_task(queue, handler, *, options=None)`, `send(queue, message, *, context=None) -> None`
+- **Event:** `consume_event(queue, topics, handler, *, options=None)`, `emit(topic, message, *, context=None) -> None`
 
 And lifecycle/stop operations:
 
 - `init()`, `close()`
 - `stop_consume_rpc(queue=None)`, `stop_consume_tasks(queue=None)`, `stop_consume_events(queue=None, topic=None)`
-- Deprecated shim: `stop_consume(mode=None)` (delegates to the mode-specific methods)
 
 `App` decides *when* to stop consuming and issues execution commands to the backend. It passes per-server queue `options` (backend-specific `QueueOptions` objects) to `consume_rpc`/`consume_task`/`consume_event` when starting consumers; backends select options they understand and ignore the rest.
 

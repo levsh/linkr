@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from dataclasses import FrozenInstanceError
 from uuid import UUID
 
 import pytest
 from pydantic import ValidationError
 
-from linkr.models import ErrorInfo, HandlerInfo, Message, Request, Response
+from linkr.models import ErrorInfo, HandlerInfo, HealthStatus, Message, Request, Response
 
 
 class TestRequestModel:
@@ -23,13 +24,13 @@ class TestRequestModel:
         req = Request(
             type="task",
             data={"method": "foo", "args": (1,), "kwds": {"x": 2}},
-            headers={"timeout": 5.0},
+            headers={"server_timeout": 5.0},
         )
 
         assert req.type == "task"
         assert req.data["args"] == (1,)
         assert req.data["kwds"] == {"x": 2}
-        assert req.headers["timeout"] == 5.0
+        assert req.headers["server_timeout"] == 5.0
 
     def test_request_requires_type(self):
         with pytest.raises(ValidationError):
@@ -110,3 +111,23 @@ class TestMessageAndInfoModels:
         assert info.options == {}
         assert info.dep_types == {}
         assert info.queue is None
+
+
+class TestHealthStatus:
+    def test_fields(self):
+        status = HealthStatus(ready=True, health=False)
+
+        assert status.ready is True
+        assert status.health is False
+
+    def test_not_ready_health_is_none(self):
+        status = HealthStatus(ready=False, health=None)
+
+        assert status.ready is False
+        assert status.health is None
+
+    def test_frozen(self):
+        status = HealthStatus(ready=True, health=True)
+
+        with pytest.raises(FrozenInstanceError):
+            status.ready = False  # type: ignore[misc]

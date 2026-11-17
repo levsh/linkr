@@ -3,10 +3,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import ssl
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Any, Literal
+from typing import Any
 from uuid import uuid4
 
 import aio_pika
@@ -20,8 +20,8 @@ from aio_pika.abc import (
     AbstractRobustConnection,
 )
 
+from ..models import HealthStatus, QueueOptions
 from ..models import Message as LinkrMessage
-from ..models import QueueOptions
 from . import Backend, Handler, Mode
 
 logger = logging.getLogger("linkr")
@@ -79,7 +79,7 @@ class RmqBackend(Backend):
         connection_name: str | None = None,
         exchange: str | dict[Mode, str] = "linkr",
         exchange_durable: bool | dict[Mode, bool] = True,
-        queue_options: RmqQueueOptions | dict[Literal["rpc", "task", "event"], RmqQueueOptions] | None = None,
+        queue_name_template: dict[Mode, str] | Callable[[str, Mode], str] | None = None,
         heartbeat: int = 30,
         blocked_connection_timeout: int = 30,
         results_queue_prefix: str | None = None,
@@ -101,8 +101,12 @@ class RmqBackend(Backend):
                 separate exchanges per mode (all keys required).
             exchange_durable: Whether the exchange(s) are durable. ``bool`` or
                 ``dict[Mode, bool]`` (same shape as *exchange*).
-            queue_options: Optional ``RmqQueueOptions`` (applied to all modes)
-                or a ``dict[Literal["rpc","task","event"], RmqQueueOptions]``.
+            queue_name_template: Mapping from delivery mode to a format string
+                (or callable ``(queue, mode) -> name``) used to derive the
+                physical RabbitMQ queue name from the logical linkr queue name.
+                Must contain keys ``"rpc"``, ``"task"``, ``"event"``. The
+                resulting ``rpc`` and ``task`` names must differ. Example:
+                ``{"rpc": "{queue}", "task": "{queue}.tasks", "event": "{queue}.events"}``.
             heartbeat: Heartbeat interval in seconds.
             blocked_connection_timeout: Timeout in seconds for blocked connections.
             results_queue_prefix: Prefix for the exclusive reply queue used by
@@ -171,31 +175,25 @@ class RmqBackend(Backend):
                 raise ValueError(f"exchange_durable dict contains invalid mode keys: {extra}")
             exchange_durables = {mode: bool(exchange_durable[mode]) for mode in modes}
 
-        # Normalize queue options
-        if queue_options is None:
-            queue_option_defaults: dict[str, RmqQueueOptions | None] = {"rpc": None, "task": None, "event": None}
-        elif isinstance(queue_options, RmqQueueOptions):
-            queue_option_defaults = {"rpc": queue_options, "task": queue_options, "event": queue_options}
-        else:
-            if not isinstance(queue_options, dict):
-                raise TypeError("queue_options must be RmqQueueOptions, dict[rpc/task/event] or None")
-            allowed = {"rpc", "task", "event"}
-            extra = [k for k in queue_options if k not in allowed]
-            if extra:
-                raise ValueError(f"queue_options dict contains invalid mode keys: {extra}")
-            queue_option_defaults = {
-                "rpc": queue_options.get("rpc"),
-                "task": queue_options.get("task"),
-                "event": queue_options.get("event"),
+        # Normalize queue name template (default = legacy prefixes)
+        if queue_name_template is None:
+            queue_name_template = {
+                "rpc": "linkr.{queue}.rpc",
+                "task": "linkr.{queue}.tasks",
+                "event": "linkr.{queue}.events",
             }
-            for mode, opt in queue_option_defaults.items():  # type: ignore[assignment]
-                if opt is not None and not isinstance(opt, RmqQueueOptions):
-                    raise TypeError(f"queue_options[{mode!r}] must be RmqQueueOptions or None")
+        if isinstance(queue_name_template, dict):
+            missing = [m for m in ("rpc", "task", "event") if m not in queue_name_template]
+            if missing:
+                raise ValueError(f"queue_name_template missing modes: {missing}")
+            names = {m: queue_name_template[m].format(queue="__q__") for m in ("rpc", "task", "event")}
+            if names["rpc"] == names["task"]:
+                raise ValueError("rpc and task queue names must differ")
 
         self._exchange_names = exchange_names
         self._exchange_types = exchange_types
         self._exchange_durables = exchange_durables
-        self._queue_option_defaults = queue_option_defaults
+        self._queue_name_template: dict[Mode, str] | Callable[[str, Mode], str] = queue_name_template  # type: ignore[assignment]
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -499,6 +497,8 @@ class RmqBackend(Backend):
         """
         Map a linkr queue name to the physical RabbitMQ queue name for *mode*.
 
+        Uses the configured ``queue_name_template``.
+
         Args:
             queue: Logical linkr queue name.
             mode: Delivery mode (``"rpc"``, ``"task"``, or ``"event"``).
@@ -506,13 +506,12 @@ class RmqBackend(Backend):
         Returns:
             The physical RabbitMQ queue name.
         """
-        if mode == "rpc":
-            return f"linkr.rpc.{queue}"
-        if mode == "task":
-            return f"linkr.tasks.{queue}"
-        if mode == "event":
-            return f"linkr.events.{queue}"
-        return queue
+        if callable(self._queue_name_template):
+            return self._queue_name_template(queue, mode)
+        fmt = self._queue_name_template.get(mode)  # type: ignore[union-attr]
+        if fmt is None:
+            raise ValueError(f"no template for mode {mode!r}")
+        return fmt.format(queue=queue)
 
     # ------------------------------------------------------------------
     # RPC
@@ -542,7 +541,7 @@ class RmqBackend(Backend):
             if queue in self._consumers.get("rpc", {}):
                 return
 
-            selected = self._select_options(options) or self._queue_option_defaults["rpc"]
+            selected = self._select_options(options)
             channel = await self._channel_for_prefetch(None if selected is None else selected.prefetch_count)
             exchange = await self._get_exchange(channel, "rpc")
             queue_name = self.queue_name_to_rmq_queue_name(queue, "rpc")
@@ -696,7 +695,7 @@ class RmqBackend(Backend):
             if queue in self._consumers.get("task", {}):
                 return
 
-            selected = self._select_options(options) or self._queue_option_defaults["task"]
+            selected = self._select_options(options)
             channel = await self._channel_for_prefetch(None if selected is None else selected.prefetch_count)
             exchange = await self._get_exchange(channel, "task")
             queue_name = self.queue_name_to_rmq_queue_name(queue, "task")
@@ -785,7 +784,7 @@ class RmqBackend(Backend):
             if queue in self._consumers.get("event", {}):
                 return
 
-            selected = self._select_options(options) or self._queue_option_defaults.get("event")
+            selected = self._select_options(options)
             channel = await self._channel_for_prefetch(None if selected is None else selected.prefetch_count)
             exchange = await self._get_exchange(channel, "event")
             queue_name = self.queue_name_to_rmq_queue_name(queue, "event")
@@ -847,3 +846,51 @@ class RmqBackend(Backend):
 
         robust_message = self._to_robust_message(message)
         await self._exchanges["event"].publish(robust_message, routing_key=topic)
+
+    async def healthcheck(self) -> HealthStatus:
+        """Return backend readiness and health status."""
+        ready = bool(self._initialized and not self._closed)
+        if not ready:
+            return HealthStatus(ready=False, health=None)
+
+        conn = self._connection
+        ch = self._channel
+        if (
+            conn is None
+            or bool(getattr(conn, "is_closed", True))
+            or ch is None
+            or bool(getattr(ch, "is_closed", True))
+        ):
+            return HealthStatus(ready=True, health=False)
+
+        active: list[tuple[str, str]] = [
+            (mode, logical_queue)
+            for mode, queues in self._consumers.items()
+            for logical_queue in queues
+        ]
+        if not active:
+            return HealthStatus(ready=True, health=True)
+
+        channel = ch
+
+        async def _queue_has_consumers(mode: str, logical_queue: str) -> bool:
+            queue_name = self.queue_name_to_rmq_queue_name(logical_queue, mode)  # type: ignore[arg-type]
+            rmq_queue = await channel.declare_queue(queue_name, passive=True)
+            decl = getattr(rmq_queue, "declaration_result", None)
+            consumer_count = getattr(decl, "consumer_count", None) if decl is not None else None
+            if consumer_count is None:
+                consumer_count = getattr(rmq_queue, "consumer_count", None)
+            return consumer_count is not None and int(consumer_count) > 0
+
+        try:
+            results = await asyncio.gather(
+                *(_queue_has_consumers(mode, logical_queue) for mode, logical_queue in active),
+                return_exceptions=True,
+            )
+        except Exception:
+            return HealthStatus(ready=True, health=False)
+
+        if any(isinstance(result, BaseException) or not result for result in results):
+            return HealthStatus(ready=True, health=False)
+
+        return HealthStatus(ready=True, health=True)

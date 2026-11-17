@@ -1,6 +1,6 @@
 # Events
 
-Events are published to a topic and delivered to matching subscribers on servers. Publishing is done via `app.client.emit(...)`; subscriptions and consuming are managed per `Server`.
+Events are published to a topic and delivered to matching subscribers on buses. Publishing is done via `app.client.emit(...)`; subscriptions and consuming are managed per `Bus`.
 
 ## Subscribing
 
@@ -8,19 +8,19 @@ Events are published to a topic and delivered to matching subscribers on servers
 from linkr import App, LocalBackend
 
 app = App("billing", backend=LocalBackend())
-server = app.server()
+bus = app.bus()
 
-@server.subscribe("user.created")
+@bus.subscribe("user.created")
 def on_user_created(user_id: int) -> None:
     ...
 
-@server.subscribe("user.*")
+@bus.subscribe("user.*")
 def on_any_user_event(user_id: int) -> None:
     ...
 ```
 
-- `@server.subscribe(topic_pattern, **options)` registers a subscriber on this server.
-- Each server has its **own event queue**; subscriptions on a server are consumed only by that server.
+- `@bus.subscribe(topic_pattern, **options)` registers a subscriber on this bus.
+- Each bus has its **own event queue**; subscriptions on a bus are consumed only by that bus.
 - Supported handler options (see [Configuration](../reference/configuration.md)): e.g. `validate_types`.
 - The event payload is passed to handlers as keyword arguments.
 - Sync and async handlers are supported.
@@ -29,18 +29,18 @@ def on_any_user_event(user_id: int) -> None:
 
 ```python
 app = App("billing", backend=LocalBackend())
-server = app.server()
+bus = app.bus()
 
-@server.subscribe("user.created")
+@bus.subscribe("user.created")
 def on_user_created(user_id: int) -> None:
     ...
 
 await app.init()
-await server.consume(mode="event")
+await bus.consume()
 await app.client.emit("user.created", {"user_id": 1})
 ```
 
-Signature: `app.client.emit(topic, event: dict, *, ttl=None, serializer=None, request_id=None, context=None)`.
+Signature: `app.client.emit(topic, event: dict, *, request_id=None, client_timeout=None, ttl=None, serializer=None, context=None)`.
 
 - `topic` is the concrete topic string to publish.
 - `event` must be a `dict` of keyword arguments delivered to matching subscribers.
@@ -48,8 +48,8 @@ Signature: `app.client.emit(topic, event: dict, *, ttl=None, serializer=None, re
 
 ## Matching and delivery
 
-- **Fan-out:** all servers with subscriptions whose patterns match the emitted topic receive the event (on their own event queues).
-- **Multiple subscribers in one server:** if multiple handlers in the same server match, all of them are invoked.
+- **Fan-out:** all buses with subscriptions whose patterns match the emitted topic receive the event (on their own event queues).
+- **Multiple subscribers in one bus:** if multiple handlers in the same bus match, all of them are invoked.
 - Wildcards:
   - `*` matches exactly one segment (e.g. `user.*` matches `user.created`).
   - `#` matches zero or more segments (e.g. `user.#` matches `user.created`, `user.profile.updated`).
@@ -62,10 +62,10 @@ Signature: `app.client.emit(topic, event: dict, *, ttl=None, serializer=None, re
 ## Consuming
 
 ```python
-server = app.server()
+bus = app.bus()
 
-await server.consume(mode="event")      # start event consuming for this server
-await server.stop_consume(mode="event") # pause event consuming (resumable)
+await bus.consume()       # start consuming for this bus
+await bus.stop_consume()  # pause this bus (resumable)
 ```
 
-Consuming is controlled per server and mode. Stopping event consuming on a server pauses its subscriptions without removing them.
+Consuming is controlled per bus. Stopping event consuming on a bus pauses its subscriptions without removing them.

@@ -26,9 +26,11 @@ Represents an incoming/outgoing operation.
 **Common headers:**
 
 - `queue`: resolved target/physical queue context
-- `timeout`: client/handler timeout (seconds)
-- `ttl`: message TTL (seconds)
-- `rttl`: response TTL (seconds, RPC)
+- `server_timeout`: handler execution timeout on the server (seconds, rpc/task)
+- `ttl`: message TTL in transport (seconds)
+- `rttl`: response TTL in transport (seconds, RPC)
+
+`client_timeout` is client-local and is not included in request headers.
 
 ### `Response`
 
@@ -70,13 +72,18 @@ Metadata for registered handlers (name, request type, function, signature, optio
 
 `App` accepts default timing parameters per delivery mode:
 
-- `rpc_timeout`, `rpc_ttl`, `rpc_rttl`: defaults for RPC handler timeout, request TTL, and response TTL (seconds)
-- `task_timeout`, `task_ttl`: defaults for task handler timeout and request TTL (seconds)
-- `event_ttl`: default event TTL (seconds)
+- `rpc_client_timeout`, `rpc_server_timeout`, `rpc_ttl`, `rpc_rttl`: defaults for RPC client wait, handler execution, request TTL, and response TTL (seconds)
+- `task_client_timeout`, `task_server_timeout`, `task_ttl`: defaults for task client publish wait, handler execution, and request TTL (seconds)
+- `event_client_timeout`, `event_ttl`: defaults for event client publish wait and event TTL (seconds)
 
-Built-in class defaults: `RPC_TIMEOUT = 60.0`, `RPC_TTL = 60.0`, `RPC_RTTL = 600.0`, `TASK_TIMEOUT = 3600.0`, `TASK_TTL = 3600.0`, `EVENT_TTL = 3600.0`. For RPC, the client waits for a response up to `timeout + ttl` seconds.
+Built-in class defaults: `RPC_CLIENT_TIMEOUT = 60.0`, `RPC_SERVER_TIMEOUT = 60.0`, `RPC_TTL = 60.0`, `RPC_RTTL = 60.0`, `TASK_CLIENT_TIMEOUT = 30.0`, `TASK_SERVER_TIMEOUT = 3600.0`, `TASK_TTL = 3600.0`, `EVENT_CLIENT_TIMEOUT = 30.0`, `EVENT_TTL = 3600.0`.
 
-Per-call overrides are available on `call`/`send`/`emit` (where applicable): `request_id`, `timeout`, `ttl`, `rttl` (RPC). See [Client API](../guides/client-api.md).
+- `client_timeout` limits client-side waiting (RPC response or publish for task/event) and is not sent in request headers.
+- `server_timeout` limits handler execution on the server (`rpc`/`task`) and is sent as `headers["server_timeout"]`.
+- `ttl` / `rttl` are transport lifetimes and are independent from client/server timeouts (no `client_timeout + ttl` wait calculation).
+- Negative `client_timeout` / `server_timeout` values are normalized to `0`. There is no server execution timeout for events.
+
+Per-call overrides are available on `call`/`send`/`emit` (where applicable): `request_id`, `client_timeout`, `server_timeout` (`call`/`send`), `ttl`, `rttl` (RPC). See [Client API](../guides/client-api.md).
 
 ## Error responses
 

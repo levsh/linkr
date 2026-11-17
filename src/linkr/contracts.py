@@ -197,27 +197,9 @@ class AppContract(BaseModel):
         }
 
     def to_json(self, *, indent: int | None = 2) -> str:
-        """
-        Serialize the contract to JSON using the stable wire shape.
-
-        Args:
-            indent: JSON indentation level.
-
-        Returns:
-            A JSON string representing the contract.
-        """
         return json.dumps(self.to_dict(), indent=indent, default=ContractBuilder.json_default)
 
     def to_html(self, *, title: str | None = None) -> str:
-        """
-        Render the contract as a self-contained HTML page.
-
-        Args:
-            title: Optional document title.
-
-        Returns:
-            An HTML document string representing the contract.
-        """
         return render_contract_html(self, title=title)
 
 
@@ -234,21 +216,12 @@ class ContractBuilder:
         include: set[str] | None = None,
         include_internal: bool = False,
     ) -> None:
-        """
-        Create a contract builder.
-
-        Args:
-            app: Application instance to describe.
-            include: Sections to include (``methods``, ``tasks``, ``events``).
-            include_internal: Whether to include internal handlers/topics.
-        """
         self._app = app
         self._include = include or {"methods", "tasks", "events"}
         self._include_internal = include_internal
         self._components: dict[str, Any] = {}
 
     def build(self) -> AppContract:
-        """Build and return the application contract model."""
         contract = AppContract(app=getattr(self._app, "name", None))
         if "methods" in self._include:
             contract.methods = self._build_methods()
@@ -279,14 +252,12 @@ class ContractBuilder:
 
     def _build_events(self) -> dict[str, EventContract]:
         events: dict[str, EventContract] = {}
-
         grouped: dict[str, list[tuple[HandlerInfo, str]]] = {}
-        for server in self._iter_servers():
+        for server in self._iter_bus_servers():
             queue_template = f"{server.queue_base}.<instance_id>"
             for topic, infos in server.subscriptions.items():
                 for info in infos:
                     grouped.setdefault(topic, []).append((info, queue_template))
-
         for topic in sorted(grouped):
             subscribers: list[EventSubscriberContract] = []
             for info, queue_template in grouped[topic]:
@@ -304,25 +275,7 @@ class ContractBuilder:
             events[topic] = EventContract(topic=topic, subscribers=subscribers)
         return events
 
-    def _build_handler(
-        self,
-        info: HandlerInfo,
-        *,
-        fq_name: str,
-        queue: str,
-        kind: Literal["rpc", "task"],
-    ) -> RpcMethodContract | TaskMethodContract:
-        if kind == "rpc":
-            return self._build_rpc_handler(info, fq_name=fq_name, queue=queue)
-        return self._build_task_handler(info, fq_name=fq_name, queue=queue)
-
-    def _build_rpc_handler(
-        self,
-        info: HandlerInfo,
-        *,
-        fq_name: str,
-        queue: str,
-    ) -> RpcMethodContract:
+    def _build_rpc_handler(self, info: HandlerInfo, *, fq_name: str, queue: str) -> RpcMethodContract:
         fn = inspect.unwrap(info.fn)
         params, args_schema, kwds_schema = self._build_input(info, fn, is_event=False)
         return RpcMethodContract(
@@ -330,22 +283,12 @@ class ContractBuilder:
             queue=queue,
             call=fq_name,
             description=inspect.getdoc(fn),
-            input=HandlerInputContract(
-                params=params,
-                args_schema=args_schema,
-                kwds_schema=kwds_schema,
-            ),
+            input=HandlerInputContract(params=params, args_schema=args_schema, kwds_schema=kwds_schema),
             output=HandlerOutputContract(json_schema=self._build_output_schema(fn)),
             validate_types=bool(getattr(info, "validate_args", False)),
         )
 
-    def _build_task_handler(
-        self,
-        info: HandlerInfo,
-        *,
-        fq_name: str,
-        queue: str,
-    ) -> TaskMethodContract:
+    def _build_task_handler(self, info: HandlerInfo, *, fq_name: str, queue: str) -> TaskMethodContract:
         fn = inspect.unwrap(info.fn)
         params, args_schema, kwds_schema = self._build_input(info, fn, is_event=False)
         return TaskMethodContract(
@@ -353,21 +296,13 @@ class ContractBuilder:
             queue=queue,
             send=fq_name,
             description=inspect.getdoc(fn),
-            input=HandlerInputContract(
-                params=params,
-                args_schema=args_schema,
-                kwds_schema=kwds_schema,
-            ),
+            input=HandlerInputContract(params=params, args_schema=args_schema, kwds_schema=kwds_schema),
             output=None,
             validate_types=bool(getattr(info, "validate_args", False)),
         )
 
     def _build_input(
-        self,
-        info: HandlerInfo,
-        fn: Callable[..., Any],
-        *,
-        is_event: bool,
+        self, info: HandlerInfo, fn: Callable[..., Any], *, is_event: bool
     ) -> tuple[list[ContractParam], dict[str, Any], dict[str, Any]]:
         try:
             sig = inspect.signature(fn)
@@ -399,7 +334,6 @@ class ContractBuilder:
         for pname, param in sig.parameters.items():
             if pname in dep_types:
                 continue
-
             annotation = hints.get(pname, inspect.Parameter.empty)
             schema = self._schema_for_annotation(annotation)
             has_default = param.default is not inspect.Parameter.empty
@@ -507,10 +441,8 @@ class ContractBuilder:
             schema = adapter.json_schema(schema_generator=self._SchemaGenerator, mode="validation")
         except Exception:
             return {"x-python-type": self._safe_repr(annotation)}
-
         if not isinstance(schema, dict):
             return {"x-python-type": self._safe_repr(annotation)}
-
         schema = json.loads(json.dumps(schema, default=self.json_default))
         defs = schema.pop("$defs", None)
         if isinstance(defs, dict):
@@ -535,6 +467,10 @@ class ContractBuilder:
         return f"{key}_{i}"
 
     def _iter_servers(self) -> list[Any]:
+        servers = getattr(self._app, "servers", None)
+        if servers is not None:
+            return list(servers)
+        # fallback for old API
         servers = getattr(self._app, "_servers", None)
         if servers is None:
             return [self._app]
@@ -544,33 +480,53 @@ class ContractBuilder:
 
     def _iter_rpc_handlers(self) -> list[tuple[tuple[str, str], HandlerInfo]]:
         items: list[tuple[tuple[str, str], HandlerInfo]] = []
+        rpc_servers = getattr(self._app, "_rpc_servers", None)
+        if rpc_servers and isinstance(rpc_servers, dict):
+            for server in rpc_servers.values():
+                handlers = getattr(server, "_handlers", None)
+                if handlers:
+                    items.extend(handlers.items())
+            return items
+        # fallback old API
         for server in self._iter_servers():
             handlers = getattr(server, "_rpc_handlers", None)
-            if handlers is None:
-                handlers = getattr(self._app, "_rpc_handlers", {})
-            items.extend(handlers.items())
+            if handlers is not None:
+                items.extend(handlers.items())
         return items
 
     def _iter_task_handlers(self) -> list[tuple[tuple[str, str], HandlerInfo]]:
         items: list[tuple[tuple[str, str], HandlerInfo]] = []
+        worker_servers = getattr(self._app, "_worker_servers", None)
+        if worker_servers and isinstance(worker_servers, dict):
+            for server in worker_servers.values():
+                handlers = getattr(server, "_handlers", None)
+                if handlers:
+                    items.extend(handlers.items())
+            return items
+        # fallback old API
         for server in self._iter_servers():
             handlers = getattr(server, "_task_handlers", None)
-            if handlers is None:
-                handlers = getattr(self._app, "_task_handlers", {})
-            items.extend(handlers.items())
+            if handlers is not None:
+                items.extend(handlers.items())
+        return items
+
+    def _iter_bus_servers(self) -> list[Any]:
+        bus_servers = getattr(self._app, "_bus_servers", None)
+        if bus_servers and isinstance(bus_servers, dict):
+            return list(bus_servers.values())
+        items = []
+        for server in self._iter_servers():
+            if hasattr(server, "subscriptions") and hasattr(server, "_subscribers"):
+                items.append(server)
         return items
 
     def _is_internal_name(self, _name: str) -> bool:
-        # Reserved for future internal handlers; respects include_internal flag.
         return False
 
     @classmethod
     def _rewrite_ref(cls, schema: Any, old: str, new: str) -> Any:
         if isinstance(schema, dict):
-            return {
-                k: (new if k == "$ref" and v == old else cls._rewrite_ref(v, old, new))
-                for k, v in schema.items()
-            }
+            return {k: (new if k == "$ref" and v == old else cls._rewrite_ref(v, old, new)) for k, v in schema.items()}
         if isinstance(schema, list):
             return [cls._rewrite_ref(item, old, new) for item in schema]
         return schema
@@ -637,15 +593,6 @@ class ContractBuilder:
 
     @staticmethod
     def json_default(value: Any) -> Any:
-        """
-        JSON fallback serializer for contract values.
-
-        Args:
-            value: Value that could not be serialized by the default encoder.
-
-        Returns:
-            A JSON-serializable representation of *value*.
-        """
         if isinstance(value, datetime):
             if value.tzinfo is None:
                 value = value.replace(tzinfo=UTC)
@@ -664,18 +611,10 @@ class HtmlContractRenderer:
     """Render an :class:`~linkr.contracts.AppContract` as a self-contained HTML page."""
 
     def __init__(self, contract: AppContract | dict[str, Any], *, title: str | None = None) -> None:
-        """
-        Create an HTML renderer for a contract.
-
-        Args:
-            contract: Contract model or dictionary.
-            title: Optional page title.
-        """
         self.contract_data = contract.to_dict() if isinstance(contract, AppContract) else dict(contract)
         self.title = title or f"Contract — {self.contract_data.get('app') or 'app'}"
 
     def render(self) -> str:
-        """Return a complete HTML document for the contract."""
         data = self.contract_data
         methods = data.get("methods") or {}
         tasks = data.get("tasks") or {}
@@ -746,21 +685,25 @@ class HtmlContractRenderer:
             fmt = schema.get("format")
             return f"{type_value}({fmt})" if fmt else str(type_value)
         title = schema.get("title")
-        return str(title) if title else "any"
+        if title:
+            return str(title)
+        if "x-python-type" in schema:
+            return str(schema["x-python-type"])
+        return "any"
 
     def _details(self, label: str, data: Any, *, open_: bool = False) -> str:
         if data is None:
             return ""
         attr = " open" if open_ else ""
         return (
-            f'<details class="schema"{attr}><summary>{self._e(label)}</summary>'
+            f'<details class="schema"{attr}>'
+            f"<summary>{self._e(label)}</summary>"
             f"<pre>{self._json(data)}</pre></details>"
         )
 
     def _badges(self, *items: tuple[str, str]) -> str:
         return "".join(
-            f'<span class="badge badge-{self._e(css_class)}">{self._e(text)}</span>'
-            for text, css_class in items
+            f'<span class="badge badge-{self._e(css_class)}">{self._e(text)}</span>' for text, css_class in items
         )
 
     def _params_table(self, params: list[dict[str, Any]]) -> str:
@@ -803,8 +746,7 @@ class HtmlContractRenderer:
     def _sidebar(self, methods: dict[str, Any], tasks: dict[str, Any], events: dict[str, Any]) -> str:
         def links(items: dict[str, Any], prefix: str) -> str:
             return "".join(
-                f'<li><a href="#{self._e(prefix + name)}">{self._e(name)}</a></li>'
-                for name in sorted(items)
+                f'<li><a href="#{self._e(prefix + name)}">{self._e(name)}</a></li>' for name in sorted(items)
             )
 
         return (
@@ -828,18 +770,14 @@ class HtmlContractRenderer:
             description = op.get("description")
             address = op.get("call") or op.get("send") or fq_name
             filter_text = " ".join(
-                str(part)
-                for part in [fq_name, address, op.get("queue"), op.get("name"), description or ""]
+                str(part) for part in [fq_name, address, op.get("queue"), op.get("name"), description or ""]
             )
             badges = [(kind.upper(), kind), (f"queue: {op.get('queue')}", "queue")]
             if op.get("validate_types"):
                 badges.append(("validate_types", "val"))
             schema_details = self._details(
                 "Input schema (args / kwds)",
-                {
-                    "args_schema": input_contract.get("args_schema"),
-                    "kwds_schema": input_contract.get("kwds_schema"),
-                },
+                {"args_schema": input_contract.get("args_schema"), "kwds_schema": input_contract.get("kwds_schema")},
             )
             if kind == "rpc":
                 result = self._details("Result schema", output_contract)
@@ -885,12 +823,10 @@ class HtmlContractRenderer:
                     + "</div>"
                 )
             filter_text = " ".join(
-                [str(topic)]
-                + [str(sub.get("handler", "")) for sub in event.get("subscribers") or []]
+                [str(topic)] + [str(sub.get("handler", "")) for sub in event.get("subscribers") or []]
             )
             cards.append(
-                f'<article class="card op" id="{self._e("e-" + topic)}" '
-                f'data-filter-text="{self._e(filter_text)}">'
+                f'<article class="card op" id="{self._e("e-" + topic)}" data-filter-text="{self._e(filter_text)}">'
                 '<div class="card-head">'
                 f"<h3><code>{self._e(topic)}</code></h3>"
                 f'<div class="badges">{self._badges(("EVENT", "event"))}</div>'
@@ -902,19 +838,9 @@ class HtmlContractRenderer:
 
     def _section_components(self, schemas: dict[str, Any]) -> str:
         if not schemas:
-            return (
-                '<section id="components"><h2>Components (schemas)</h2>'
-                '<p class="muted">None.</p></section>'
-            )
-        blocks = [
-            self._details(name, schema)
-            for name, schema in sorted(schemas.items())
-        ]
-        return (
-            '<section id="components"><h2>Components (schemas)</h2>'
-            + "".join(blocks)
-            + "</section>"
-        )
+            return '<section id="components"><h2>Components (schemas)</h2><p class="muted">None.</p></section>'
+        blocks = [self._details(name, schema) for name, schema in sorted(schemas.items())]
+        return '<section id="components"><h2>Components (schemas)</h2>' + "".join(blocks) + "</section>"
 
     def _head(self) -> str:
         return f"""<meta charset="utf-8">
@@ -993,49 +919,32 @@ function filterOps(query) {
 
 
 def render_contract_html(contract: AppContract | dict[str, Any], *, title: str | None = None) -> str:
-    """
-    Render a contract model or contract dictionary as a self-contained HTML page.
-
-    Args:
-        contract: Contract model or dictionary to render.
-        title: Optional document title.
-
-    Returns:
-        An HTML document string representing the contract.
-    """
     return HtmlContractRenderer(contract, title=title).render()
 
 
-def describe_app(
-    app: Any,
-    *,
-    include: set[str] | None = None,
-    include_internal: bool = False,
-) -> AppContract:
-    """
-    Build and return an :class:`AppContract` model for *app*.
-
-    Args:
-        app: Application instance to describe.
-        include: Contract sections to include (``methods``, ``tasks``, ``events``).
-        include_internal: Whether to include internal handlers/topics.
-
-    Returns:
-        The generated application contract.
-    """
+def describe_app(app: Any, *, include: set[str] | None = None, include_internal: bool = False) -> AppContract:
     return ContractBuilder(app, include=include, include_internal=include_internal).build()
 
 
 def describe_app_json(app: Any, *, indent: int | None = 2, **kwargs: Any) -> str:
-    """
-    Serialize :func:`describe_app` to a JSON string.
-
-    Args:
-        app: Application instance to describe.
-        indent: JSON indentation level.
-        **kwargs: Additional arguments forwarded to :func:`describe_app`.
-
-    Returns:
-        A JSON string representing the application contract.
-    """
     return describe_app(app, **kwargs).to_json(indent=indent)
+
+
+def describe_app_html(app: Any, *, title: str | None = None, **describe_kwargs: Any) -> str:
+    return describe_app(app, **describe_kwargs).to_html(title=title)
+
+
+def expose_describe(
+    app: Any,
+    name: str = "describe",
+    server: Any | None = None,
+    **handler_options: Any,
+) -> Callable[[], dict[str, Any]]:
+    if server is None:
+        server = app.rpc()
+
+    def describe_handler() -> dict[str, Any]:
+        return describe_app(app).to_dict()
+
+    server.method(name, **handler_options)(describe_handler)
+    return describe_handler

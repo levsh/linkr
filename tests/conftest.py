@@ -48,8 +48,24 @@ async def app(local_backend: LocalBackend):
 
 
 @pytest.fixture
+async def rpc(app: App):
+    return app.rpc()
+
+
+@pytest.fixture
+async def worker(app: App):
+    return app.worker()
+
+
+@pytest.fixture
+async def bus(app: App):
+    return app.bus()
+
+
+@pytest.fixture
 async def server(app: App):
-    return app.server()
+    """Backward-compatible fixture: returns rpc server (root)."""
+    return app.rpc()
 
 
 @pytest.fixture(scope="class")

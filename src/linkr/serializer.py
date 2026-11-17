@@ -229,6 +229,8 @@ class JsonRpcSerializer(Serializer):
         method: str = obj.get("method", "")
         params = obj.get("params")
         raw_id = obj.get("id")
+        if raw_id is None:
+            raise ValueError("not a JSON-RPC 2.0 request: missing id")
         headers: dict[str, Any] = obj.get("headers", {})
 
         if isinstance(params, list):
@@ -241,7 +243,7 @@ class JsonRpcSerializer(Serializer):
             args = ()
             kwds = {}
 
-        req_id = UUID(raw_id) if raw_id is not None else uuid4()
+        req_id = UUID(raw_id)
         return Request.model_validate(
             {
                 "id": req_id,

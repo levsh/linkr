@@ -3,16 +3,16 @@ from __future__ import annotations
 import json
 
 from linkr import App, LocalBackend
-from linkr.contracts import render_contract_html
+from linkr.contracts import describe_app, expose_describe, render_contract_html
 
 
 def build_demo_app() -> App:
     app = App("demo", backend=LocalBackend())
-    root = app.server()
-    math = app.server("math")
-    users = app.server("users")
-    email = app.server("email")
-    reports = app.server("reports")
+    math = app.rpc("math")
+    users = app.rpc("users")
+    email = app.worker("email")
+    reports = app.worker("reports")
+    bus = app.bus()
 
     @math.method("add")
     def add(x: int, y: int) -> int:
@@ -34,23 +34,23 @@ def build_demo_app() -> App:
         """Generate a report asynchronously."""
         return None
 
-    @root.subscribe("user.created")
+    @bus.subscribe("user.created")
     def on_user_created(user_id: int, email: str) -> None:
         """Handle user creation events."""
         return None
 
-    @root.subscribe("order.#")
+    @bus.subscribe("order.#")
     def on_order_event(order_id: str, amount: float | None = None) -> None:
         """Handle all order-related events."""
         return None
 
-    app.expose_describe(server=root)
+    expose_describe(app)
     return app
 
 
 def main() -> None:
     app = build_demo_app()
-    contract = app.describe()
+    contract = describe_app(app)
     print(json.dumps(contract.to_dict(), indent=2, ensure_ascii=False))
 
     html_doc = contract.to_html()

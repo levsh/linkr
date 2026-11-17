@@ -17,6 +17,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+from linkr.contracts import describe_app_html
+
 
 ROOT = Path(__file__).resolve().parents[1]
 DEMO_APP_PATH = ROOT / "docs" / "examples" / "contract_demo_app.py"
@@ -79,7 +81,7 @@ If the embedded view does not load, open [contract-demo.html](contract-demo.html
 
 def main() -> int:
     app = load_demo_app()
-    contract_html = app.describe_html(title="Contract — demo (example)")
+    contract_html = describe_app_html(app, title="Contract — demo (example)")
 
     HTML_OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     MD_OUT_PATH.parent.mkdir(parents=True, exist_ok=True)

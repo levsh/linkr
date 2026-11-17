@@ -120,7 +120,7 @@ Emitted when consuming stops.
 
 | Reason | Meaning |
 |---|---|
-| `stopped` | Consuming stopped for the server/mode/queue (emitted by `Server.stop_consume`) |
+| `stopped` | Consuming stopped for the mode server/queue (emitted by `server.stop_consume()`) |
 | `all` | All consumers of the mode stopped |
 | `queue_drained` | Queue consumer stopped because no handlers/subscriptions remain |
 | `topic_unsubscribed` | Only a specific event topic subscription was removed; consumer remains active |

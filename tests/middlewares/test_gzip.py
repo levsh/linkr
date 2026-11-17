@@ -139,7 +139,7 @@ class TestGzipMiddlewareWithApp:
 
     async def test_gzip_roundtrip_small_payload(self):
         app = App("app", backend=LocalBackend(), middlewares=[GzipMiddleware()])
-        srv = app.server()
+        srv = app.rpc()
         await app.init()
 
         @srv.method("ping")
@@ -152,7 +152,7 @@ class TestGzipMiddlewareWithApp:
 
     async def test_gzip_large_request(self):
         app = App("app", backend=LocalBackend(), middlewares=[GzipMiddleware()])
-        srv = app.server()
+        srv = app.rpc()
         await app.init()
 
         @srv.method("echo")
@@ -166,7 +166,7 @@ class TestGzipMiddlewareWithApp:
 
     async def test_gzip_large_response(self):
         app = App("app", backend=LocalBackend(), middlewares=[GzipMiddleware()])
-        srv = app.server()
+        srv = app.rpc()
         await app.init()
 
         @srv.method("get_large")

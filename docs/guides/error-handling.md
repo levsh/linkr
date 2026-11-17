@@ -54,13 +54,14 @@ Type validation can be enabled globally or per handler:
 from linkr import App, LocalBackend
 
 app = App("orders", backend=LocalBackend(), validate_types=True)
-server = app.server()
+rpc = app.rpc()
+worker = app.worker()
 
-@server.method("add", validate_types=True)
+@rpc.method("add", validate_types=True)
 def add(x: int, y: int) -> int:
     return x + y
 
-@server.task("process", validate_types=False)
+@worker.task("process", validate_types=False)
 def process(data: dict) -> None:
     ...
 ```
@@ -85,10 +86,13 @@ Registered handlers are used when converting server-side exceptions to RPC error
 
 ## Timeouts
 
-- Client/RPC call timeout behavior can raise `RPCError` with `ErrorCode.TIMEOUT` when a response is not received in time.
-- Handler execution may also time out (surfaced as timeout errors per mode).
+- **RPC client wait:** `client_timeout` limits how long the client waits for a response; expiry raises `RPCError` with `ErrorCode.TIMEOUT` (`"Client wait timed out"`).
+- **RPC/task handler execution:** `server_timeout` limits handler execution on the server; expiry produces `ErrorCode.TIMEOUT` (`"Handler execution timed out"`) for RPC responses and handler timeout handling for tasks.
+- **Publish wait (task/event):** `client_timeout` limits client wait for backend publish/send.
+- **Transport TTL:** `ttl` / `rttl` are transport message lifetimes and are independent from client/server timeouts.
+- Negative `client_timeout` / `server_timeout` are normalized to `0`. There is no server execution timeout for events.
 
-Configure defaults via `App(..., rpc_timeout=..., rpc_ttl=..., rpc_rttl=..., task_timeout=..., task_ttl=..., event_ttl=...)` and per-call parameters where supported (see [Client API](client-api.md)).
+Configure defaults via `App(..., rpc_client_timeout=..., rpc_server_timeout=..., rpc_ttl=..., rpc_rttl=..., task_client_timeout=..., task_server_timeout=..., task_ttl=..., event_client_timeout=..., event_ttl=...)` and per-call parameters where supported (see [Client API](client-api.md)).
 
 ## Tasks and events
 
@@ -106,19 +110,19 @@ Use [hooks](hooks.md) and application logging for monitoring and reaction (metri
 from linkr import App, LocalBackend, RPCError
 
 app = App("svc", backend=LocalBackend(), validate_types=True)
-server = app.server()
+rpc = app.rpc()
 
 @app.exception_handler(PermissionError)
 def on_permission(exc: Exception) -> tuple[str, str]:
     return ("PermissionDenied", str(exc))
 
-@server.method("secure")
+@rpc.method("secure")
 def secure() -> None:
     raise PermissionError("denied")
 
 async def main() -> None:
     async with app:
-        await server.consume(mode="rpc")
+        await rpc.consume()
         try:
             await app.client.call("svc.secure", (), {})
         except RPCError as exc:

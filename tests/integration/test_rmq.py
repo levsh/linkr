@@ -36,7 +36,10 @@ def uid(prefix: str = "t") -> str:
 
 
 def make_backend(rabbitmq) -> RmqBackend:
-    return RmqBackend(host=get_ip(rabbitmq), port=5672)
+    return RmqBackend(
+        host=get_ip(rabbitmq),
+        port=5672,
+    )
 
 
 @pytest.mark.integration
@@ -47,7 +50,7 @@ class TestRmqBackend:
         client_name = f"client_{suffix}"
 
         server_app = App(server_name, backend=make_backend(rabbitmq))
-        server_srv = server_app.server()
+        server_srv = server_app.rpc()
         client_app = App(client_name, backend=make_backend(rabbitmq))
 
         @server_srv.method("add")
@@ -59,7 +62,7 @@ class TestRmqBackend:
             return value
 
         async with server_app, client_app:
-            await server_srv.consume(mode="rpc")
+            await server_srv.consume()
             assert await call(client_app, f"{server_name}.add", 2, 3) == 5
             assert await client_app.client.call(f"{server_name}.add", (), {"x": 10, "y": 7}) == 17
             assert await call(client_app, f"{server_name}.echo", {"a": [1, 2], "b": None}) == {
@@ -70,7 +73,7 @@ class TestRmqBackend:
     async def test_rpc_default_queue_shared_by_methods_and_dispatch(self, rabbitmq):
         name = uid("app")
         app = App(name, backend=make_backend(rabbitmq))
-        srv = app.server()
+        srv = app.rpc()
         client = App(uid("client"), backend=make_backend(rabbitmq))
         seen: list[str] = []
 
@@ -85,7 +88,7 @@ class TestRmqBackend:
             return f"bar:{value}"
 
         async with app, client:
-            await srv.consume(mode="rpc")
+            await srv.consume()
             calls = [call(client, f"{name}.foo", "1"), call(client, f"{name}.bar", "2")]
             results = await asyncio.gather(*calls)
             assert sorted(results) == ["bar:2", "foo:1"]
@@ -95,8 +98,8 @@ class TestRmqBackend:
     async def test_rpc_grouped_queues_isolated(self, rabbitmq):
         name = uid("app")
         app = App(name, backend=make_backend(rabbitmq))
-        sa = app.server("serviceA")
-        sb = app.server("serviceB")
+        sa = app.rpc("serviceA")
+        sb = app.rpc("serviceB")
         client = App(uid("client"), backend=make_backend(rabbitmq))
 
         @sa.method("foo")
@@ -108,8 +111,8 @@ class TestRmqBackend:
             return "bar"
 
         async with app, client:
-            await sa.consume(mode="rpc")
-            await sb.consume(mode="rpc")
+            await sa.consume()
+            await sb.consume()
             assert await call(client, f"{name}.serviceA.foo") == "foo"
             assert await call(client, f"{name}.serviceB.bar") == "bar"
 
@@ -117,13 +120,13 @@ class TestRmqBackend:
             await app._backend.stop_consume_rpc(f"{name}.serviceA")
             assert await call(client, f"{name}.serviceB.bar") == "bar"
             with pytest.raises(RPCError) as exc_info:
-                await client.client.call(f"{name}.serviceA.foo", (), {}, timeout=1.0, ttl=1.0)
+                await client.client.call(f"{name}.serviceA.foo", (), {}, client_timeout=1.0, ttl=1.0)
             assert exc_info.value.error_code == ErrorCode.TIMEOUT
 
     async def test_rpc_errors_and_custom_exception(self, rabbitmq):
         name = uid("app")
         app = App(name, backend=make_backend(rabbitmq), validate_types=True)
-        srv = app.server()
+        srv = app.rpc()
         client = App(uid("client"), backend=make_backend(rabbitmq))
 
         @srv.method("fail")
@@ -143,7 +146,7 @@ class TestRmqBackend:
             raise KeyError("missing")
 
         async with app, client:
-            await srv.consume(mode="rpc")
+            await srv.consume()
 
             with pytest.raises(RPCError) as exc_info:
                 await call(client, f"{name}.unknown")
@@ -172,8 +175,8 @@ class TestRmqBackend:
 
         app1 = App(worker_name, backend=backend1)
         app2 = App(worker_name, backend=backend2)
-        srv1 = app1.server("email")
-        srv2 = app2.server("email")
+        srv1 = app1.worker("email")
+        srv2 = app2.worker("email")
         client = App(uid("client"), backend=client_backend)
 
         received: list[str] = []
@@ -190,8 +193,8 @@ class TestRmqBackend:
                 received.append(f"2:{item}")
 
         async with app1, app2, client:
-            await srv1.consume(mode="task")
-            await srv2.consume(mode="task")
+            await srv1.consume()
+            await srv2.consume()
 
             total = 20
             qualified_task = f"{worker_name}.email.send"
@@ -213,9 +216,9 @@ class TestRmqBackend:
         app2 = App(f"app2_{suffix}", backend=make_backend(rabbitmq))
         app3 = App(f"app3_{suffix}", backend=make_backend(rabbitmq))
         publisher = App(f"pub_{suffix}", backend=make_backend(rabbitmq))
-        s1 = app1.server()
-        s2 = app2.server()
-        s3 = app3.server()
+        s1 = app1.bus()
+        s2 = app2.bus()
+        s3 = app3.bus()
 
         events1: list[int] = []
         events2: list[int] = []
@@ -234,9 +237,9 @@ class TestRmqBackend:
             events3.append(user_id)
 
         async with app1, app2, app3, publisher:
-            await s1.consume(mode="event")
-            await s2.consume(mode="event")
-            await s3.consume(mode="event")
+            await s1.consume()
+            await s2.consume()
+            await s3.consume()
 
             await emit(publisher, "user.created", user_id=42)
             await emit(publisher, "user.deleted", user_id=7)

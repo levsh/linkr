@@ -21,31 +21,38 @@ class Config:
 
 # Module-level factory functions (accessible to get_type_hints)
 
+
 def make_db_factory() -> callable:
     instance = None
+
     def factory() -> Database:
         nonlocal instance
         if instance is None:
             instance = Database("postgres://db")
         return instance
+
     return factory
 
 
 def make_transient_db_factory() -> callable:
     counter = {"count": 0}
+
     def factory() -> Database:
         counter["count"] += 1
         return Database(f"db-{counter['count']}")
+
     return factory
 
 
 def make_cfg_factory() -> callable:
     instance = None
+
     def factory() -> Config:
         nonlocal instance
         if instance is None:
             instance = Config("production")
         return instance
+
     return factory
 
 
@@ -73,8 +80,10 @@ class TestDependsMarker:
     def test_depends_with_factory(self) -> None:
         def factory():
             return Database("postgres://test")
+
         ann = Depends[Database, factory]
         from typing import Annotated, get_args, get_origin
+
         assert get_origin(ann) is Annotated
         args = get_args(ann)
         assert args[0] is Database

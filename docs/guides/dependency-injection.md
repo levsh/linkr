@@ -18,9 +18,9 @@ class Database:
 db_factory = lambda: Database("postgres://localhost/app")
 
 app = App("orders", backend=LocalBackend())
-server = app.server()
+rpc = app.rpc()
 
-@server.method("ping")
+@rpc.method("ping")
 def ping(db: Depends[Database, db_factory]) -> str:
     return db.url
 ```
@@ -37,9 +37,9 @@ def ping(db: Depends[Database, db_factory]) -> str:
 
 ```python
 app = App("app", backend=LocalBackend())
-server = app.server()
+rpc = app.rpc()
 
-@server.method("op")
+@rpc.method("op")
 def op(db: Depends[Database, lambda: Database("postgres://...")]) -> str:
     return db.url
 ```
@@ -62,9 +62,9 @@ def singleton_db_factory() -> Callable[[], Database]:
 
 get_db = singleton_db_factory()
 app = App("app", backend=LocalBackend())
-server = app.server()
+rpc = app.rpc()
 
-@server.method("op")
+@rpc.method("op")
 def op(db: Depends[Database, get_db]) -> str:
     return db.url
 ```
@@ -84,9 +84,9 @@ class DatabaseFactory:
 
 db_factory = DatabaseFactory("postgres://...")
 app = App("app", backend=LocalBackend())
-server = app.server()
+worker = app.worker()
 
-@server.task("job")
+@worker.task("job")
 async def job(db: Depends[Database, db_factory]) -> None:
     ...
 ```
@@ -99,9 +99,9 @@ Returns the `Request` currently being dispatched in the active async context.
 from linkr import get_current_request
 
 app = App("app", backend=LocalBackend())
-server = app.server()
+rpc = app.rpc()
 
-@server.method("whoami")
+@rpc.method("whoami")
 def whoami() -> str:
     req = get_current_request()
     return str(req.id)
@@ -114,9 +114,9 @@ def whoami() -> str:
 
 Dependencies and request context are available to:
 
-- `@server.method(...)` handlers
-- `@server.task(...)` handlers
-- `@server.subscribe(...)` handlers
+- `@rpc.method(...)` handlers
+- `@worker.task(...)` handlers
+- `@bus.subscribe(...)` handlers
 
 ## Notes
 

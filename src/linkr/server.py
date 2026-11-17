@@ -4,10 +4,10 @@ import asyncio
 import inspect
 import logging
 import re
-from collections.abc import Awaitable, Callable, Coroutine
+from collections.abc import Callable, Coroutine, Sequence
 from contextvars import ContextVar
 from functools import wraps
-from typing import TYPE_CHECKING, Annotated, Any, Literal, get_args, get_origin, get_type_hints
+from typing import TYPE_CHECKING, Annotated, Any, get_args, get_origin, get_type_hints
 from uuid import UUID
 
 from pydantic import TypeAdapter, ValidationError
@@ -24,9 +24,9 @@ from .hooks import (
     RequestReceivedEvent,
 )
 from .middleware import apply_middleware, wrap_app_server, wrap_wire_server
-from .models import ErrorInfo, HandlerInfo, Message, QueueOptions, Request, RequestType, Response
+from .models import ErrorInfo, HandlerInfo, Message, QueueOptions, Request, Response
 from .serializer import Serializer
-from .utils import topic_to_regex
+from .utils import normalize_queue_options, topic_to_regex
 
 if TYPE_CHECKING:
     from .app import App
@@ -37,8 +37,7 @@ _current_request: ContextVar[Request | None] = ContextVar("linkr_current_request
 
 
 def get_current_request() -> Request:
-    """
-    Get the request being dispatched in this async context.
+    """Get the request being dispatched in this async context.
 
     Raises ``RuntimeError`` if called outside an active handler dispatch context.
     """
@@ -48,248 +47,70 @@ def get_current_request() -> Request:
     return req
 
 
-ModeName = Literal["rpc", "task", "event"]
-
-
-class Server:
-    """
-    Server scope: handler registration and consume/stop control per mode.
-
-    A server is bound to an application and a queue scope (root or named path).
-    """
+class _Server:
+    """Base server with common handler processing logic."""
 
     def __init__(
         self,
         app: App,
-        path: str | None,
+        path: str | None = None,
         *,
-        options: dict[str, tuple[QueueOptions, ...] | None],
+        options: QueueOptions | Sequence[QueueOptions] | None = None,
+        validate_types: bool | None = None,
     ) -> None:
-        """
-        Create a server scope.
+        if path is not None and (not isinstance(path, str) or path == ""):
+            raise ValueError("server path must not be empty")
 
-        Args:
-            app: Owning application instance.
-            path: Server scope path (``None`` for root).
-            options: Normalized per-mode backend queue options.
-        """
         self._app = app
         self._path = path
+        self._queue_base = app.name if path is None else f"{app.name}.{path}"
+        self._options = normalize_queue_options(options)
+        self._validate_types = validate_types
         self._serializer = app.serializers[0]
         self._serializers_map = {s.name: s for s in app.serializers}
         self._app_mw = app.app_middlewares
         self._wire_mw = app.wire_middlewares
 
-        self._queue_base = app.name if path is None else f"{app.name}.{path}"
-
-        self._rpc_options = options.get("rpc")
-        self._task_options = options.get("task")
-        self._event_options = options.get("event")
-
-        self._rpc_handlers: dict[tuple[str, str], HandlerInfo] = {}
-        self._task_handlers: dict[tuple[str, str], HandlerInfo] = {}
-        self._subscribers: dict[re.Pattern[str], list[HandlerInfo]] = {}
-        self._subscription_patterns: set[str] = set()
-
-        self._rpc_consuming = False
-        self._task_consuming = False
-        self._event_consuming = False
-        self._event_queue: str | None = None
-
     # ------------------------------------------------------------------
-    # Properties / identity
+    # Properties
     # ------------------------------------------------------------------
 
     @property
     def app(self) -> App:
-        """Application that owns this server."""
         return self._app
 
     @property
     def path(self) -> str | None:
-        """Server scope path (``None`` for the root scope)."""
         return self._path
 
     @property
     def queue_base(self) -> str:
-        """Base queue name for this server scope."""
         return self._queue_base
 
     @property
-    def event_queue(self) -> str | None:
-        """Physical event queue name while event consuming is active."""
-        return self._event_queue
+    def validate_types(self) -> bool | None:
+        return self._validate_types
 
     @property
-    def methods(self) -> dict[str, HandlerInfo]:
-        """RPC handlers registered on this server, keyed by local leaf name."""
-        return {leaf: info for (_, leaf), info in self._rpc_handlers.items()}
-
-    @property
-    def tasks(self) -> dict[str, HandlerInfo]:
-        """Task handlers registered on this server, keyed by local leaf name."""
-        return {leaf: info for (_, leaf), info in self._task_handlers.items()}
-
-    @property
-    def subscriptions(self) -> dict[str, list[HandlerInfo]]:
-        """Event subscriptions registered on this server, grouped by topic pattern."""
-        grouped: dict[str, list[HandlerInfo]] = {}
-        for handlers in self._subscribers.values():
-            for info in handlers:
-                grouped.setdefault(info.name, []).append(info)
-        return dict(sorted(grouped.items()))
-
-    def options_match(self, options: dict[str, tuple[QueueOptions, ...] | None]) -> bool:
-        """
-        Return whether normalized per-mode options match this server configuration.
-
-        Args:
-            options: Normalized per-mode queue options to compare.
-
-        Returns:
-            ``True`` if all mode options match, otherwise ``False``.
-        """
-        return (
-            self._rpc_options == options.get("rpc")
-            and self._task_options == options.get("task")
-            and self._event_options == options.get("event")
-        )
+    def options(self) -> tuple[QueueOptions, ...] | None:
+        return self._options
 
     # ------------------------------------------------------------------
-    # Registration
+    # Shared helpers
     # ------------------------------------------------------------------
 
-    def _validate_leaf_name(self, name: str) -> str:
+    @staticmethod
+    def _validate_leaf_name(name: str) -> str:
         if not isinstance(name, str) or not name:
             raise ValueError("handler name must not be empty")
         if "." in name:
             raise ValueError("handler name must not contain '.'")
         return name
 
-    def method(
-        self,
-        name: str,
-        **options: Any,
-    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-        """
-        Register an RPC handler for a local leaf name on this server.
-
-        Args:
-            name: Local RPC handler name (leaf, without dots).
-            **options: Handler options (e.g. validation settings).
-
-        Returns:
-            A decorator that registers the handler function.
-        """
-        leaf = self._validate_leaf_name(name)
-        return self._register("rpc", leaf, options)
-
-    def task(
-        self,
-        name: str,
-        **options: Any,
-    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-        """
-        Register a task handler for a local leaf name on this server.
-
-        Args:
-            name: Local task handler name (leaf, without dots).
-            **options: Handler options (e.g. validation settings).
-
-        Returns:
-            A decorator that registers the handler function.
-        """
-        leaf = self._validate_leaf_name(name)
-        return self._register("task", leaf, options)
-
-    def subscribe(
-        self,
-        topic: str,
-        **options: Any,
-    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-        """
-        Register an event subscriber for a topic pattern on this server.
-
-        Args:
-            topic: Topic pattern to subscribe to.
-            **options: Handler options (e.g. validation settings).
-
-        Returns:
-            A decorator that registers the subscriber function.
-        """
-        pattern = topic_to_regex(topic)
-
-        def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
-            @wraps(fn)
-            def wrapper(*args: Any, **kwds: Any) -> Any:
-                return fn(*args, **kwds)
-
-            dep_types = self._dep_types(fn)
-            validate_args, validation_adapters, validation_param_names = self._build_validation_plan(
-                fn, options, dep_types
-            )
-
-            info = HandlerInfo(
-                name=topic,
-                request_type="event",
-                fn=wrapper,
-                signature=str(inspect.signature(fn)),
-                options=options,
-                dep_types=dep_types,
-                queue=self._event_queue_name(),
-                validate_args=validate_args,
-                validation_adapters=validation_adapters,
-                validation_param_names=validation_param_names,
-            )
-            self._subscribers.setdefault(pattern, []).append(info)
-            self._subscription_patterns.add(topic)
-            return wrapper
-
-        return decorator
-
-    def _register(
-        self,
-        mode: Literal["rpc", "task"],
-        leaf: str,
-        options: dict[str, Any],
-    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-        queue = self._queue_base
-        fq_name = f"{queue}.{leaf}"
-        registry = self._rpc_handlers if mode == "rpc" else self._task_handlers
-        key = (queue, leaf)
-
-        def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
-            if key in registry:
-                raise ValueError(f"{mode} handler already registered for {queue!r}: {leaf!r}")
-
-            @wraps(fn)
-            def wrapper(*args: Any, **kwds: Any) -> Any:
-                return fn(*args, **kwds)
-
-            dep_types = self._dep_types(fn)
-            validate_args, validation_adapters, validation_param_names = self._build_validation_plan(
-                fn, options, dep_types
-            )
-
-            registry[key] = HandlerInfo(
-                name=fq_name,
-                request_type=mode,
-                fn=wrapper,
-                signature=str(inspect.signature(fn)),
-                options=options,
-                dep_types=dep_types,
-                queue=queue,
-                validate_args=validate_args,
-                validation_adapters=validation_adapters,
-                validation_param_names=validation_param_names,
-            )
-            return wrapper
-
-        return decorator
-
-    # ------------------------------------------------------------------
-    # Validation / deps plans
-    # ------------------------------------------------------------------
+    @staticmethod
+    def _validate_handler(fn: object) -> None:
+        if not inspect.isroutine(fn):
+            raise TypeError(f"handler must be a function or method, got {type(fn).__name__!r}")
 
     @staticmethod
     def _dep_types(fn: Callable[..., Any]) -> dict[str, tuple[type, Callable[[], Any] | None]]:
@@ -318,10 +139,11 @@ class Server:
     ) -> tuple[bool, dict[str, Any], tuple[str, ...]]:
         validate = options.get("validate_types")
         if validate is None:
+            validate = self._validate_types
+        if validate is None:
             validate = self._app.validate_types
         if not validate:
             return False, {}, ()
-
         try:
             unwrapped_fn = inspect.unwrap(fn)
             sig = inspect.signature(unwrapped_fn)
@@ -329,7 +151,6 @@ class Server:
             hints = get_type_hints(unwrapped_fn, localns={"Depends": Depends})
         except Exception:
             return False, {}, ()
-
         adapters: dict[str, Any] = {}
         for pname, hint in hints.items():
             if pname == "return":
@@ -344,169 +165,195 @@ class Server:
                 adapters[pname] = TypeAdapter(hint)
             except Exception:
                 continue
-
         if not adapters:
             return False, {}, ()
-
         return True, adapters, param_names
 
-    # ------------------------------------------------------------------
-    # Consume / stop
-    # ------------------------------------------------------------------
+    def _get_serializer(self, name: str | None) -> Serializer:
+        if name is None:
+            return self._serializer
+        try:
+            return self._serializers_map[name]
+        except KeyError as exc:
+            raise RequestError(error_message=f"unknown serializer: {name}") from exc
 
-    def _event_queue_name(self) -> str:
-        return f"{self._queue_base}.{self._app.instance_id}"
+    def _detect_and_load_serializer(self, message: Message) -> tuple[Serializer, Request]:
+        ser_name = message.headers.get("serializer")
+        if ser_name is not None:
+            serializer = self._get_serializer(str(ser_name))
+            return serializer, serializer.loads_request(message)
+        for candidate in self._app.serializers:
+            try:
+                request = candidate.loads_request(message)
+                return candidate, request
+            except Exception:
+                continue
+        raise RequestError(error_message="cannot detect serializer for incoming message")
 
-    async def consume(self, mode: ModeName | None = None) -> None:
-        """
-        Start consuming for the selected mode(s), or all modes when omitted.
-
-        Args:
-            mode: Delivery mode to consume (``"rpc"``, ``"task"``, or ``"event"``),
-                or ``None`` to consume all registered modes.
-
-        Raises:
-            RuntimeError: If the application is closed.
-            ValueError: If an unknown mode is provided.
-        """
-        if self._app.is_closed:
-            raise RuntimeError("App is closed")
-        modes = ("rpc", "task", "event") if mode is None else (mode,)
-        for m in modes:
-            if m == "rpc":
-                await self._consume_rpc()
-            elif m == "task":
-                await self._consume_task()
-            elif m == "event":
-                await self._consume_event()
+    def _resolve_deps(self, info: HandlerInfo) -> dict[str, Any]:
+        deps: dict[str, Any] = {}
+        for name, (type_, factory) in info.dep_types.items():
+            if factory is None:
+                try:
+                    deps[name] = type_()
+                except Exception as exc:
+                    type_name = getattr(type_, "__name__", repr(type_))
+                    raise RuntimeError(f"Depends[{type_name}] requires inline factory") from exc
             else:
-                raise ValueError(f"unknown consume mode: {m!r}")
+                deps[name] = factory()
+        return deps
 
-    async def stop_consume(self, mode: ModeName | None = None) -> None:
-        """
-        Stop consuming for the selected mode(s), or all modes when omitted.
+    def _validate_args(self, info: HandlerInfo, request: Request) -> Response | None:
+        if not info.validate_args or not info.validation_adapters:
+            return None
+        data = request.data
+        adapters = info.validation_adapters
+        param_names = info.validation_param_names
+        errors: list[str] = []
+        if request.type == "event":
+            event_data = data.get("event") or {}
+            for pname, value in event_data.items():
+                adapter = adapters.get(pname)
+                if adapter is None:
+                    continue
+                try:
+                    adapter.validate_python(value)
+                except ValidationError as exc:
+                    errors.append(f"{pname}: {exc.errors(include_input=False, include_url=False)}")
+        else:
+            args = data.get("args") or ()
+            kwds = data.get("kwds") or {}
+            for i, arg in enumerate(args):
+                if i >= len(param_names):
+                    break
+                pname = param_names[i]
+                if pname in kwds:
+                    continue
+                adapter = adapters.get(pname)
+                if adapter is None:
+                    continue
+                try:
+                    adapter.validate_python(arg)
+                except ValidationError as exc:
+                    errors.append(f"{pname}: {exc.errors(include_input=False, include_url=False)}")
+            for pname, value in kwds.items():
+                adapter = adapters.get(pname)
+                if adapter is None:
+                    continue
+                try:
+                    adapter.validate_python(value)
+                except ValidationError as exc:
+                    errors.append(f"{pname}: {exc.errors(include_input=False, include_url=False)}")
+        if errors:
+            return Response(
+                id=request.id,
+                type="error",
+                data=ErrorInfo(error_code=ErrorCode.VALIDATION_ERROR, error_message="; ".join(errors)),
+            )
+        return None
 
-        Args:
-            mode: Delivery mode to stop (``"rpc"``, ``"task"``, or ``"event"``),
-                or ``None`` to stop all modes.
-
-        Raises:
-            ValueError: If an unknown mode is provided.
-        """
-        modes = ("rpc", "task", "event") if mode is None else (mode,)
-        for m in modes:
-            if m == "rpc":
-                await self._stop_consume_rpc()
-            elif m == "task":
-                await self._stop_consume_task()
-            elif m == "event":
-                await self._stop_consume_event()
+    async def _run_handler(self, info: HandlerInfo, request: Request) -> Any:
+        token_req = _current_request.set(request)
+        try:
+            deps = self._resolve_deps(info)
+            if info.request_type == "event":
+                args: tuple[Any, ...] = ()
+                kwds = {**deps, **request.data.get("event", {})}
             else:
-                raise ValueError(f"unknown consume mode: {m!r}")
+                args = tuple(request.data.get("args", ()))
+                kwds = {**deps, **request.data.get("kwds", {})}
+            if inspect.iscoroutinefunction(inspect.unwrap(info.fn)):
+                coro = info.fn(*args, **kwds)
+                server_timeout = request.headers.get("server_timeout")
+                if info.request_type in ("rpc", "task") and server_timeout is not None:
+                    wait_timeout = max(float(server_timeout), 0.0)
+                    return await asyncio.wait_for(coro, wait_timeout)
+                return await coro
+            return info.fn(*args, **kwds)
+        finally:
+            _current_request.reset(token_req)
 
-    async def _consume_rpc(self) -> None:
-        if not self._rpc_handlers or self._rpc_consuming:
-            return
-        queue = self._queue_base
-        await self._consume_backend("rpc", queue, self._make_handler("rpc", queue))
-        self._rpc_consuming = True
-        if self._app.hooks.on_consume_start:
-            await self._app.hooks.on_consume_start.emit(
-                ConsumeStartEvent(app=self._app.name, mode="rpc", queue=queue, topics=())
-            )
+    # ------------------------------------------------------------------
+    # Request handling
+    # ------------------------------------------------------------------
 
-    async def _consume_task(self) -> None:
-        if not self._task_handlers or self._task_consuming:
-            return
-        queue = self._queue_base
-        await self._consume_backend("task", queue, self._make_handler("task", queue))
-        self._task_consuming = True
-        if self._app.hooks.on_consume_start:
-            await self._app.hooks.on_consume_start.emit(
-                ConsumeStartEvent(app=self._app.name, mode="task", queue=queue, topics=())
-            )
+    def _make_handler(self, queue: str) -> Callable[[Message], Coroutine[Any, Any, Message | None]]:
+        async def handler(message: Message) -> Message | None:
+            return await self._handle(queue, message)
 
-    async def _consume_event(self) -> None:
-        if not self._subscription_patterns or self._event_consuming:
-            return
-        queue = self._event_queue_name()
-        topics = tuple(sorted(self._subscription_patterns))
-        await self._consume_backend("event", queue, self._make_handler("event", queue), topics=list(topics))
-        self._event_queue = queue
-        self._event_consuming = True
-        if self._app.hooks.on_consume_start:
-            await self._app.hooks.on_consume_start.emit(
-                ConsumeStartEvent(app=self._app.name, mode="event", queue=queue, topics=topics)
-            )
+        return handler
 
-    async def _stop_consume_rpc(self) -> None:
-        if not self._rpc_consuming:
-            return
-        await self._app.backend.stop_consume_rpc(self._queue_base)
-        self._rpc_consuming = False
-        if self._app.hooks.on_consume_stop:
-            await self._app.hooks.on_consume_stop.emit(
-                ConsumeStopEvent(
-                    app=self._app.name,
-                    mode="rpc",
-                    queue=self._queue_base,
-                    topic=None,
-                    reason="stopped",
+    async def _handle(self, queue: str, message: Message) -> Message | None:
+        if not self._wire_mw and not self._app_mw:
+            _serializer, request = self._detect_and_load_serializer(message)
+            if self._app.hooks.on_request_received:
+                await self._app.hooks.on_request_received.emit(
+                    RequestReceivedEvent(app=self._app.name, mode=request.type, queue=queue, request=request)
                 )
-            )
+            response = await self._dispatch_request(request)
+            if response is None:
+                return None
+            response_message = _serializer.dumps_response(response)
+            rttl = request.headers.get("rttl")
+            if rttl is not None:
+                response_message.headers["rttl"] = rttl
+            return response_message
 
-    async def _stop_consume_task(self) -> None:
-        if not self._task_consuming:
-            return
-        await self._app.backend.stop_consume_tasks(self._queue_base)
-        self._task_consuming = False
-        if self._app.hooks.on_consume_stop:
-            await self._app.hooks.on_consume_stop.emit(
-                ConsumeStopEvent(
-                    app=self._app.name,
-                    mode="task",
-                    queue=self._queue_base,
-                    topic=None,
-                    reason="stopped",
+        async def core() -> tuple[Message, Response] | tuple[None, None]:
+            _serializer, request = self._detect_and_load_serializer(message)
+            if self._app.hooks.on_request_received:
+                await self._app.hooks.on_request_received.emit(
+                    RequestReceivedEvent(app=self._app.name, mode=request.type, queue=queue, request=request)
                 )
-            )
 
-    async def _stop_consume_event(self) -> None:
-        if not self._event_consuming or self._event_queue is None:
-            self._event_consuming = False
-            self._event_queue = None
-            return
-        queue = self._event_queue
-        await self._app.backend.stop_consume_events(queue)
-        self._event_consuming = False
-        self._event_queue = None
-        if self._app.hooks.on_consume_stop:
-            await self._app.hooks.on_consume_stop.emit(
-                ConsumeStopEvent(
-                    app=self._app.name,
-                    mode="event",
-                    queue=queue,
-                    topic=None,
-                    reason="stopped",
-                )
+            async def dispatch_core() -> Response | None:
+                return await self._dispatch_request(request)
+
+            app_handler = apply_middleware(
+                self._app_mw,
+                dispatch_core,
+                lambda mw, n: wrap_app_server(mw, n, request),
             )
+            response = await app_handler()
+            if response is None:
+                return None, None
+            response_message = _serializer.dumps_response(response)
+            rttl = request.headers.get("rttl")
+            if rttl is not None:
+                response_message.headers["rttl"] = rttl
+            return response_message, response
+
+        wire_handler = apply_middleware(
+            self._wire_mw,
+            core,
+            lambda mw, n: wrap_wire_server(mw, n, message),
+        )
+        result = await wire_handler()
+        if result is None or result[0] is None:
+            return None
+        response_message, _ = result
+        return response_message
+
+    # ------------------------------------------------------------------
+    # Backend consume helpers
+    # ------------------------------------------------------------------
 
     async def _consume_backend(
         self,
-        mode: ModeName,
+        mode: str,
         queue: str,
         handler: Callable[[Message], Coroutine[Any, Any, Message | None]],
         *,
         topics: list[str] | None = None,
+        options: tuple[QueueOptions, ...] | None = None,
     ) -> None:
         backend = self._app.backend
         if mode == "event":
-            options = self._event_options
             consume_event = backend.consume_event
             try:
-                params: Any = inspect.signature(consume_event).parameters
+                params = inspect.signature(consume_event).parameters
             except (TypeError, ValueError):
-                params = {}
+                params = inspect.Signature().parameters
             if "options" in params or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
                 await consume_event(queue, topics or [], handler, options=options)
             else:
@@ -519,15 +366,12 @@ class Server:
                 await consume_event(queue, topics or [], handler)
             return
 
-        options = self._rpc_options if mode == "rpc" else self._task_options
         consume = backend.consume_rpc if mode == "rpc" else backend.consume_task
         args: tuple[Any, ...] = (queue, handler)
-
         try:
             params = inspect.signature(consume).parameters
         except (TypeError, ValueError):
-            params = {}
-
+            params = inspect.Signature().parameters
         if "options" in params or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
             await consume(*args, options=options)
         else:
@@ -541,128 +385,101 @@ class Server:
             await consume(*args)
 
     # ------------------------------------------------------------------
-    # Handler / dispatch (server-side)
+    # Abstract interface
     # ------------------------------------------------------------------
 
-    def _make_handler(
+    async def _dispatch_request(self, request: Request) -> Response | None:
+        raise NotImplementedError
+
+    async def consume(self) -> None:
+        raise NotImplementedError
+
+    async def stop_consume(self) -> None:
+        raise NotImplementedError
+
+
+class RPC(_Server):
+    """RPC server."""
+
+    def __init__(
         self,
-        request_type: RequestType,
-        queue: str,
-    ) -> Callable[[Message], Coroutine[Any, Any, Message | None]]:
-        async def handler(message: Message) -> Message | None:
-            return await self._handle(request_type, queue, message)
+        app: App,
+        path: str | None = None,
+        *,
+        options: QueueOptions | Sequence[QueueOptions] | None = None,
+        validate_types: bool | None = None,
+    ) -> None:
+        super().__init__(app, path, options=options, validate_types=validate_types)
+        self._handlers: dict[tuple[str, str], HandlerInfo] = {}
+        self._consuming = False
 
-        return handler
+    @property
+    def methods(self) -> dict[str, HandlerInfo]:
+        return {leaf: info for (_, leaf), info in self._handlers.items()}
 
-    async def _handle(self, request_type: RequestType, queue: str, message: Message) -> Message | None:
-        try:
-            # Fast path: no middleware at all
-            if not self._wire_mw and not self._app_mw:
-                _serializer, request = self._detect_and_load_serializer(message)
+    def method(self, name: str, **options: Any) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        leaf = self._validate_leaf_name(name)
+        return self._register(leaf, options)
 
-                if self._app.hooks.on_request_received:
-                    await self._app.hooks.on_request_received.emit(
-                        RequestReceivedEvent(
-                            app=self._app.name,
-                            mode=request.type,
-                            queue=queue,
-                            request=request,
-                        )
-                    )
+    def _register(self, leaf: str, options: dict[str, Any]) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        queue = self._queue_base
+        fq_name = f"{queue}.{leaf}"
+        key = (queue, leaf)
 
-                response = await self._dispatch_request(request)
-                if response is None or request_type != "rpc":
-                    return None
+        def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+            self._validate_handler(fn)
+            if key in self._handlers:
+                raise ValueError(f"rpc handler already registered for {queue!r}: {leaf!r}")
 
-                response_message = _serializer.dumps_response(response)
+            @wraps(fn)
+            def wrapper(*args: Any, **kwds: Any) -> Any:
+                return fn(*args, **kwds)
 
-                rttl = request.headers.get("rttl")
-                if rttl is not None:
-                    response_message.headers["rttl"] = rttl
+            dep_types = self._dep_types(fn)
+            validate_args, validation_adapters, validation_param_names = self._build_validation_plan(
+                fn, options, dep_types
+            )
+            self._handlers[key] = HandlerInfo(
+                name=fq_name,
+                request_type="rpc",
+                fn=wrapper,
+                signature=str(inspect.signature(fn)),
+                options=options,
+                dep_types=dep_types,
+                queue=queue,
+                validate_args=validate_args,
+                validation_adapters=validation_adapters,
+                validation_param_names=validation_param_names,
+            )
+            return wrapper
 
-                return response_message
+        return decorator
 
-            # Full pipeline with middleware
-            async def core() -> tuple[Message, Response] | tuple[None, None]:
-                _serializer, request = self._detect_and_load_serializer(message)
-
-                if self._app.hooks.on_request_received:
-                    await self._app.hooks.on_request_received.emit(
-                        RequestReceivedEvent(
-                            app=self._app.name,
-                            mode=request.type,
-                            queue=queue,
-                            request=request,
-                        )
-                    )
-
-                async def dispatch_core() -> Response | None:
-                    return await self._dispatch_request(request)
-
-                app_handler: Callable[[], Awaitable[Response | None]] = apply_middleware(
-                    self._app_mw,
-                    dispatch_core,
-                    lambda mw, n: wrap_app_server(mw, n, request),
-                )
-
-                response = await app_handler()
-                if response is None or request_type != "rpc":
-                    return None, None
-
-                response_message = _serializer.dumps_response(response)
-
-                rttl = request.headers.get("rttl")
-                if rttl is not None:
-                    response_message.headers["rttl"] = rttl
-
-                return response_message, response
-
-            wire_handler: Callable[
-                [],
-                Awaitable[tuple[Message, Response] | tuple[None, None]],
-            ] = apply_middleware(
-                self._wire_mw,
-                core,
-                lambda mw, n: wrap_wire_server(mw, n, message),
+    async def consume(self) -> None:
+        if self._consuming:
+            return
+        if self._app.is_closed:
+            raise RuntimeError("App is closed")
+        queue = self._queue_base
+        handler = self._make_handler(queue)
+        await self._consume_backend("rpc", queue, handler, options=self._options)
+        self._consuming = True
+        if self._app.hooks.on_consume_start:
+            await self._app.hooks.on_consume_start.emit(
+                ConsumeStartEvent(app=self._app.name, mode="rpc", queue=queue, topics=())
             )
 
-            result = await wire_handler()
-            if result is None or result[0] is None:
-                return None
-
-            response_message, _ = result
-            return response_message
-
-        except Exception as exc:
-            if self._app.hooks.on_message_dropped:
-                await self._app.hooks.on_message_dropped.emit(
-                    MessageDroppedEvent(
-                        app=self._app.name,
-                        mode=request_type,
-                        queue=queue,
-                        reason="decode_error",
-                        request=None,
-                        handler=None,
-                        topic=None,
-                        error=exc,
-                        details=None,
-                    )
-                )
-            if request_type != "rpc":
-                logger.exception("Failed to process %s message from queue %s", request_type, queue)
-                return None
-            return self._build_error_response(exc, message, self._serializer)
+    async def stop_consume(self) -> None:
+        if not self._consuming:
+            return
+        await self._app.backend.stop_consume_rpc(self._queue_base)
+        self._consuming = False
+        if self._app.hooks.on_consume_stop:
+            await self._app.hooks.on_consume_stop.emit(
+                ConsumeStopEvent(app=self._app.name, mode="rpc", queue=self._queue_base, topic=None, reason="stopped")
+            )
 
     async def _dispatch_request(self, request: Request) -> Response | None:
-        if request.type == "rpc":
-            return await self._dispatch_rpc_request(request)
-        if request.type == "task":
-            await self._dispatch_task_request(request)
-            return None
-        await self._dispatch_event_request(request)
-        return None
-
-    async def _dispatch_rpc_request(self, request: Request) -> Response | None:
         queue = request.headers.get("queue", self._queue_base)
         method = request.data.get("method")
 
@@ -691,8 +508,7 @@ class Server:
                 )
             return response
 
-        info = self._rpc_handlers.get((str(queue), method))
-
+        info = self._handlers.get((str(queue), method))
         if info is None:
             response = Response(
                 id=request.id,
@@ -739,12 +555,7 @@ class Server:
         if self._app.hooks.before_handler:
             await self._app.hooks.before_handler.emit(
                 BeforeHandlerEvent(
-                    app=self._app.name,
-                    mode="rpc",
-                    queue=str(queue),
-                    request=request,
-                    handler=info,
-                    topic=None,
+                    app=self._app.name, mode="rpc", queue=str(queue), request=request, handler=info, topic=None
                 )
             )
         try:
@@ -753,10 +564,7 @@ class Server:
             response = Response(
                 id=request.id,
                 type="error",
-                data=ErrorInfo(
-                    error_code=ErrorCode.TIMEOUT,
-                    error_message="Handler execution timed out",
-                ),
+                data=ErrorInfo(error_code=ErrorCode.TIMEOUT, error_message="Handler execution timed out"),
             )
             if self._app.hooks.on_handler_error:
                 await self._app.hooks.on_handler_error.emit(
@@ -808,7 +616,231 @@ class Server:
             )
         return Response(id=request.id, type="result", data=result)
 
-    async def _dispatch_task_request(self, request: Request) -> None:
+    def _error_response(self, request: Request, exc: Exception) -> Response:
+        rpc_err = self._resolve_exception_handler(exc)
+        if rpc_err is None and isinstance(exc, RPCError):
+            rpc_err = exc
+        if rpc_err is not None:
+            return Response(
+                id=request.id,
+                type="error",
+                data=ErrorInfo(
+                    error_code=rpc_err.error_code,
+                    error_message=rpc_err.error_message,
+                    error_details=rpc_err.error_details,
+                ),
+            )
+        logger.exception(exc)
+        return Response(
+            id=request.id,
+            type="error",
+            data=ErrorInfo(
+                error_code=ErrorCode.INTERNAL_ERROR,
+                error_message=str(exc),
+                error_details={"exc_type": type(exc).__name__},
+            ),
+        )
+
+    def _resolve_exception_handler(self, exc: Exception) -> RPCError | None:
+        for cls in type(exc).__mro__:
+            handler = self._app.exception_handlers.get(cls)
+            if handler is None:
+                continue
+            try:
+                result = handler(exc)
+            except RPCError as rpc_error:
+                return rpc_error
+            except Exception:
+                logger.exception("Exception handler failed for %s", cls.__name__)
+                return None
+            if isinstance(result, RPCError):
+                return result
+            if isinstance(result, tuple):
+                if len(result) < 2:
+                    logger.error("Exception handler for %s returned an invalid tuple", cls.__name__)
+                    return None
+                code, message, *details = result
+                return RPCError(
+                    error_code=code,
+                    error_message=message,
+                    error_details=details[0] if details else None,
+                )
+            if isinstance(result, dict):
+                return RPCError(
+                    error_code=result.get("error_code", ErrorCode.INTERNAL_ERROR),
+                    error_message=result.get("error_message", str(exc)),
+                    error_details=result.get("error_details"),
+                )
+            if isinstance(result, str):
+                return RPCError(error_code=ErrorCode.INTERNAL_ERROR, error_message=result)
+            return None
+        return None
+
+    def _build_error_response(self, exc: Exception, message: Message, fallback_serializer: Serializer) -> Message:
+        if isinstance(exc, RPCError):
+            error_code = exc.error_code
+            error_message = exc.error_message
+            details = exc.error_details
+        else:
+            logger.exception(exc)
+            error_code = ErrorCode.INTERNAL_ERROR
+            error_message = "Internal server error"
+            details = {"exc_type": type(exc).__name__}
+
+        best_serializer = fallback_serializer
+        message_id = UUID(int=0)
+
+        candidates: list[Serializer] = []
+        ser_name = message.headers.get("serializer")
+        if ser_name is not None:
+            try:
+                candidates.append(self._get_serializer(str(ser_name)))
+            except Exception:
+                pass
+        for c in self._app.serializers:
+            if c not in candidates:
+                candidates.append(c)
+
+        for s in candidates:
+            try:
+                request = s.loads_request(message)
+                message_id = request.id
+                best_serializer = s
+                break
+            except Exception:
+                continue
+
+        error_resp = Response(
+            id=message_id,
+            type="error",
+            data=ErrorInfo(error_code=error_code, error_message=error_message, error_details=details),
+        )
+        return best_serializer.dumps_response(error_resp)
+
+    async def _handle(self, queue: str, message: Message) -> Message | None:
+        try:
+            return await super()._handle(queue, message)
+        except Exception as exc:
+            if self._app.hooks.on_message_dropped:
+                await self._app.hooks.on_message_dropped.emit(
+                    MessageDroppedEvent(
+                        app=self._app.name,
+                        mode="rpc",
+                        queue=queue,
+                        reason="decode_error",
+                        request=None,
+                        handler=None,
+                        topic=None,
+                        error=exc,
+                        details=None,
+                    )
+                )
+            return self._build_error_response(exc, message, self._serializer)
+
+
+class Worker(_Server):
+    """Task server."""
+
+    def __init__(
+        self,
+        app: App,
+        path: str | None = None,
+        *,
+        options: QueueOptions | Sequence[QueueOptions] | None = None,
+        validate_types: bool | None = None,
+    ) -> None:
+        super().__init__(app, path, options=options, validate_types=validate_types)
+        self._handlers: dict[tuple[str, str], HandlerInfo] = {}
+        self._consuming = False
+
+    @property
+    def tasks(self) -> dict[str, HandlerInfo]:
+        return {leaf: info for (_, leaf), info in self._handlers.items()}
+
+    def task(self, name: str, **options: Any) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        leaf = self._validate_leaf_name(name)
+        return self._register(leaf, options)
+
+    def _register(self, leaf: str, options: dict[str, Any]) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        queue = self._queue_base
+        fq_name = f"{queue}.{leaf}"
+        key = (queue, leaf)
+
+        def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+            self._validate_handler(fn)
+            if key in self._handlers:
+                raise ValueError(f"task handler already registered for {queue!r}: {leaf!r}")
+
+            @wraps(fn)
+            def wrapper(*args: Any, **kwds: Any) -> Any:
+                return fn(*args, **kwds)
+
+            dep_types = self._dep_types(fn)
+            validate_args, validation_adapters, validation_param_names = self._build_validation_plan(
+                fn, options, dep_types
+            )
+            self._handlers[key] = HandlerInfo(
+                name=fq_name,
+                request_type="task",
+                fn=wrapper,
+                signature=str(inspect.signature(fn)),
+                options=options,
+                dep_types=dep_types,
+                queue=queue,
+                validate_args=validate_args,
+                validation_adapters=validation_adapters,
+                validation_param_names=validation_param_names,
+            )
+            return wrapper
+
+        return decorator
+
+    async def consume(self) -> None:
+        if self._consuming:
+            return
+        if self._app.is_closed:
+            raise RuntimeError("App is closed")
+        queue = self._queue_base
+        handler = self._make_handler(queue)
+        await self._consume_backend("task", queue, handler, options=self._options)
+        self._consuming = True
+        if self._app.hooks.on_consume_start:
+            await self._app.hooks.on_consume_start.emit(
+                ConsumeStartEvent(app=self._app.name, mode="task", queue=queue, topics=())
+            )
+
+    async def stop_consume(self) -> None:
+        if not self._consuming:
+            return
+        await self._app.backend.stop_consume_tasks(self._queue_base)
+        self._consuming = False
+        if self._app.hooks.on_consume_stop:
+            await self._app.hooks.on_consume_stop.emit(
+                ConsumeStopEvent(app=self._app.name, mode="task", queue=self._queue_base, topic=None, reason="stopped")
+            )
+
+    async def _handle(self, queue: str, message: Message) -> Message | None:
+        try:
+            return await super()._handle(queue, message)
+        except Exception as exc:
+            if self._app.hooks.on_message_dropped:
+                await self._app.hooks.on_message_dropped.emit(
+                    MessageDroppedEvent(
+                        app=self._app.name,
+                        mode="task",
+                        queue=queue,
+                        reason="decode_error",
+                        request=None,
+                        handler=None,
+                        topic=None,
+                        error=exc,
+                        details=None,
+                    )
+                )
+            logger.exception("Failed to handle task message on queue %s", queue)
+            return None
+
+    async def _dispatch_request(self, request: Request) -> Response | None:
         queue = request.headers.get("queue", self._queue_base)
         task = request.data.get("task")
 
@@ -830,7 +862,7 @@ class Server:
                 )
             return None
 
-        info = self._task_handlers.get((str(queue), task))
+        info = self._handlers.get((str(queue), task))
         if info is None:
             logger.warning("No handler registered for task: %s", task)
             if self._app.hooks.on_message_dropped:
@@ -851,11 +883,7 @@ class Server:
 
         error_response = self._validate_args(info, request)
         if error_response is not None:
-            logger.warning(
-                "Invalid arguments for task %s: %s",
-                task,
-                error_response.data,
-            )
+            logger.warning("Invalid arguments for task %s: %s", task, error_response.data)
             if self._app.hooks.on_message_dropped:
                 await self._app.hooks.on_message_dropped.emit(
                     MessageDroppedEvent(
@@ -875,12 +903,7 @@ class Server:
         if self._app.hooks.before_handler:
             await self._app.hooks.before_handler.emit(
                 BeforeHandlerEvent(
-                    app=self._app.name,
-                    mode="task",
-                    queue=str(queue),
-                    request=request,
-                    handler=info,
-                    topic=None,
+                    app=self._app.name, mode="task", queue=str(queue), request=request, handler=info, topic=None
                 )
             )
         try:
@@ -936,9 +959,154 @@ class Server:
             )
         return None
 
-    async def _dispatch_event_request(self, request: Request) -> None:
+
+class Bus(_Server):
+    """Event server."""
+
+    def __init__(
+        self,
+        app: App,
+        path: str | None = None,
+        *,
+        options: QueueOptions | Sequence[QueueOptions] | None = None,
+        validate_types: bool | None = None,
+    ) -> None:
+        super().__init__(app, path, options=options, validate_types=validate_types)
+        self._subscribers_by_topic: dict[str, list[HandlerInfo]] = {}
+        self._patterns_by_topic: dict[str, re.Pattern[str]] = {}
+        self._subscription_patterns: set[str] = set()
+        self._consuming = False
+        self._event_queue: str | None = None
+
+    @property
+    def event_queue(self) -> str | None:
+        return self._event_queue
+
+    @property
+    def subscriptions(self) -> dict[str, list[HandlerInfo]]:
+        grouped: dict[str, list[HandlerInfo]] = {}
+        for handlers in self._subscribers_by_topic.values():
+            for info in handlers:
+                grouped.setdefault(info.name, []).append(info)
+        return dict(sorted(grouped.items()))
+
+    def _event_queue_name(self) -> str:
+        return f"{self._queue_base}.{self._app.instance_id}"
+
+    def subscribe(self, topic: str, **options: Any) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        if topic not in self._patterns_by_topic:
+            self._patterns_by_topic[topic] = topic_to_regex(topic)
+
+        def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+            self._validate_handler(fn)
+
+            @wraps(fn)
+            def wrapper(*args: Any, **kwds: Any) -> Any:
+                return fn(*args, **kwds)
+
+            dep_types = self._dep_types(fn)
+            validate_args, validation_adapters, validation_param_names = self._build_validation_plan(
+                fn, options, dep_types
+            )
+            info = HandlerInfo(
+                name=topic,
+                request_type="event",
+                fn=wrapper,
+                signature=str(inspect.signature(fn)),
+                options=options,
+                dep_types=dep_types,
+                queue=self._event_queue_name(),
+                validate_args=validate_args,
+                validation_adapters=validation_adapters,
+                validation_param_names=validation_param_names,
+            )
+            self._subscribers_by_topic.setdefault(topic, []).append(info)
+            self._subscription_patterns.add(topic)
+            return wrapper
+
+        return decorator
+
+    async def consume(self) -> None:
+        if self._consuming:
+            return
+        if self._app.is_closed:
+            raise RuntimeError("App is closed")
+        if not self._subscription_patterns:
+            return
+        queue = self._event_queue_name()
+        topics = tuple(sorted(self._subscription_patterns))
+        handler = self._make_handler(queue)
+        await self._consume_backend("event", queue, handler, topics=list(topics), options=self._options)
+        self._event_queue = queue
+        self._consuming = True
+        if self._app.hooks.on_consume_start:
+            await self._app.hooks.on_consume_start.emit(
+                ConsumeStartEvent(app=self._app.name, mode="event", queue=queue, topics=topics)
+            )
+
+    async def stop_consume(self) -> None:
+        if not self._consuming or self._event_queue is None:
+            self._consuming = False
+            self._event_queue = None
+            return
+        queue = self._event_queue
+        await self._app.backend.stop_consume_events(queue)
+        self._consuming = False
+        self._event_queue = None
+        if self._app.hooks.on_consume_stop:
+            await self._app.hooks.on_consume_stop.emit(
+                ConsumeStopEvent(app=self._app.name, mode="event", queue=queue, topic=None, reason="stopped")
+            )
+
+    async def _handle(self, queue: str, message: Message) -> Message | None:
+        try:
+            return await super()._handle(queue, message)
+        except Exception as exc:
+            if self._app.hooks.on_message_dropped:
+                await self._app.hooks.on_message_dropped.emit(
+                    MessageDroppedEvent(
+                        app=self._app.name,
+                        mode="event",
+                        queue=queue,
+                        reason="decode_error",
+                        request=None,
+                        handler=None,
+                        topic=None,
+                        error=exc,
+                        details=None,
+                    )
+                )
+            logger.exception("Failed to handle event message on queue %s", queue)
+            return None
+
+    def _find_subscribers(self, topic: str) -> list[HandlerInfo]:
+        subscribers: list[HandlerInfo] = []
+        for t, handlers in self._subscribers_by_topic.items():
+            pat = self._patterns_by_topic.get(t)
+            if pat is not None and pat.fullmatch(topic):
+                subscribers.extend(handlers)
+        return subscribers
+
+    async def _dispatch_request(self, request: Request) -> Response | None:
         queue = request.headers.get("queue", self._event_queue or self._queue_base)
-        topic = request.data["topic"]
+        topic = request.data.get("topic")
+        if not isinstance(topic, str):
+            logger.warning("Event request does not contain a topic")
+            if self._app.hooks.on_message_dropped:
+                await self._app.hooks.on_message_dropped.emit(
+                    MessageDroppedEvent(
+                        app=self._app.name,
+                        mode="event",
+                        queue=str(queue),
+                        reason="invalid_request",
+                        request=request,
+                        handler=None,
+                        topic=None,
+                        error=None,
+                        details=None,
+                    )
+                )
+            return None
         subscribers = self._find_subscribers(topic)
         if not subscribers:
             logger.debug("No event subscribers for topic: %s", topic)
@@ -957,7 +1125,6 @@ class Server:
                     )
                 )
             return None
-
         await asyncio.gather(*(self._exec_subscriber(subscriber, request) for subscriber in subscribers))
         return None
 
@@ -966,11 +1133,7 @@ class Server:
         topic = str(request.data.get("topic"))
         error_response = self._validate_args(info, request)
         if error_response is not None:
-            logger.warning(
-                "Invalid event arguments for %s: %s",
-                info.name,
-                error_response.data,
-            )
+            logger.warning("Invalid event arguments for %s: %s", info.name, error_response.data)
             if self._app.hooks.on_message_dropped:
                 await self._app.hooks.on_message_dropped.emit(
                     MessageDroppedEvent(
@@ -990,12 +1153,7 @@ class Server:
         if self._app.hooks.before_handler:
             await self._app.hooks.before_handler.emit(
                 BeforeHandlerEvent(
-                    app=self._app.name,
-                    mode="event",
-                    queue=str(queue),
-                    request=request,
-                    handler=info,
-                    topic=topic,
+                    app=self._app.name, mode="event", queue=str(queue), request=request, handler=info, topic=topic
                 )
             )
         try:
@@ -1031,229 +1189,3 @@ class Server:
                     result=result,
                 )
             )
-
-    async def _run_handler(self, info: HandlerInfo, request: Request) -> Any:
-        token_req = _current_request.set(request)
-        try:
-            deps = self._resolve_deps(info)
-            if info.request_type == "event":
-                args: tuple[Any, ...] = ()
-                kwds = {**deps, **request.data.get("event", {})}
-            else:
-                args = tuple(request.data.get("args", ()))
-                kwds = {**deps, **request.data.get("kwds", {})}
-            result = info.fn(*args, **kwds)
-            if inspect.isawaitable(result):
-                timeout = request.headers.get("timeout")
-                if info.request_type in ("rpc", "task") and timeout is not None:
-                    timeout_value = max(float(timeout), 0)
-                    if timeout_value > 0:
-                        async with asyncio.timeout(timeout_value):
-                            return await result
-                    return await result
-                return await result
-            return result
-        finally:
-            _current_request.reset(token_req)
-
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-
-    def _get_serializer(self, name: str | None) -> Serializer:
-        if name is None:
-            return self._serializer
-        try:
-            return self._serializers_map[name]
-        except KeyError as exc:
-            raise RequestError(error_message=f"unknown serializer: {name}") from exc
-
-    def _detect_and_load_serializer(self, message: Message) -> tuple[Serializer, Request]:
-        ser_name = message.headers.get("serializer")
-        if ser_name is not None:
-            serializer = self._get_serializer(str(ser_name))
-            return serializer, serializer.loads_request(message)
-
-        for candidate in self._app.serializers:
-            try:
-                request = candidate.loads_request(message)
-                return candidate, request
-            except Exception:
-                continue
-
-        raise RequestError(
-            error_message="cannot detect serializer for incoming message",
-        )
-
-    def _resolve_deps(self, info: HandlerInfo) -> dict[str, Any]:
-        deps: dict[str, Any] = {}
-        for name, (type_, factory) in info.dep_types.items():
-            if factory is None:
-                try:
-                    deps[name] = type_()
-                except Exception as exc:
-                    type_name = getattr(type_, "__name__", repr(type_))
-                    raise RuntimeError(f"Depends[{type_name}] requires inline factory") from exc
-            else:
-                deps[name] = factory()
-        return deps
-
-    def _validate_args(self, info: HandlerInfo, request: Request) -> Response | None:
-        if not info.validate_args or not info.validation_adapters:
-            return None
-
-        data = request.data
-        adapters = info.validation_adapters
-        param_names = info.validation_param_names
-
-        errors: list[str] = []
-
-        if request.type == "event":
-            event_data = data.get("event") or {}
-            for pname, value in event_data.items():
-                adapter = adapters.get(pname)
-                if adapter is None:
-                    continue
-                try:
-                    adapter.validate_python(value)
-                except ValidationError as exc:
-                    errors.append(f"{pname}: {exc.errors(include_input=False, include_url=False)}")
-        else:
-            args = data.get("args") or ()
-            kwds = data.get("kwds") or {}
-
-            for i, arg in enumerate(args):
-                if i >= len(param_names):
-                    break
-                pname = param_names[i]
-                if pname in kwds:
-                    continue
-                adapter = adapters.get(pname)
-                if adapter is None:
-                    continue
-                try:
-                    adapter.validate_python(arg)
-                except ValidationError as exc:
-                    errors.append(f"{pname}: {exc.errors(include_input=False, include_url=False)}")
-
-            for pname, value in kwds.items():
-                adapter = adapters.get(pname)
-                if adapter is None:
-                    continue
-                try:
-                    adapter.validate_python(value)
-                except ValidationError as exc:
-                    errors.append(f"{pname}: {exc.errors(include_input=False, include_url=False)}")
-
-        if errors:
-            return Response(
-                id=request.id,
-                type="error",
-                data=ErrorInfo(
-                    error_code=ErrorCode.VALIDATION_ERROR,
-                    error_message="; ".join(errors),
-                ),
-            )
-
-        return None
-
-    def _error_response(self, request: Request, exc: Exception) -> Response:
-        rpc_err = self._resolve_exception_handler(exc)
-        if rpc_err is None and isinstance(exc, RPCError):
-            rpc_err = exc
-
-        if rpc_err is not None:
-            return Response(
-                id=request.id,
-                type="error",
-                data=ErrorInfo(
-                    error_code=rpc_err.error_code,
-                    error_message=rpc_err.error_message,
-                    error_details=rpc_err.error_details,
-                ),
-            )
-
-        logger.exception(exc)
-        return Response(
-            id=request.id,
-            type="error",
-            data=ErrorInfo(
-                error_code=ErrorCode.INTERNAL_ERROR,
-                error_message=str(exc),
-                error_details={"exc_type": type(exc).__name__},
-            ),
-        )
-
-    def _resolve_exception_handler(self, exc: Exception) -> RPCError | None:
-        for cls in type(exc).__mro__:
-            handler = self._app.exception_handlers.get(cls)
-            if handler is None:
-                continue
-
-            try:
-                result = handler(exc)
-            except RPCError as rpc_error:
-                return rpc_error
-            except Exception:
-                logger.exception("Exception handler failed for %s", cls.__name__)
-                return None
-
-            if isinstance(result, RPCError):
-                return result
-            if isinstance(result, tuple):
-                if len(result) < 2:
-                    logger.error("Exception handler for %s returned an invalid tuple", cls.__name__)
-                    return None
-                code, message, *details = result
-                return RPCError(
-                    error_code=code,
-                    error_message=message,
-                    error_details=details[0] if details else None,
-                )
-            if isinstance(result, dict):
-                return RPCError(
-                    error_code=result.get("error_code", ErrorCode.INTERNAL_ERROR),
-                    error_message=result.get("error_message", str(exc)),
-                    error_details=result.get("error_details"),
-                )
-            if isinstance(result, str):
-                return RPCError(error_code=ErrorCode.INTERNAL_ERROR, error_message=result)
-            return None
-
-        return None
-
-    def _build_error_response(
-        self,
-        exc: Exception,
-        message: Message,
-        serializer: Serializer,
-    ) -> Message:
-        if isinstance(exc, RPCError):
-            error_code = exc.error_code
-            error_message = exc.error_message
-            details = exc.error_details
-        else:
-            logger.exception(exc)
-            error_code = ErrorCode.INTERNAL_ERROR
-            error_message = "Internal server error"
-            details = {"exc_type": type(exc).__name__}
-
-        try:
-            request = serializer.loads_request(message)
-            message_id = request.id
-        except Exception:
-            message_id = UUID(int=0)
-
-        error_resp = Response(
-            id=message_id,
-            type="error",
-            data=ErrorInfo(error_code=error_code, error_message=error_message, error_details=details),
-        )
-        return serializer.dumps_response(error_resp)
-
-    def _find_subscribers(self, topic: str) -> list[HandlerInfo]:
-        subscribers: list[HandlerInfo] = []
-        for pattern, handlers in self._subscribers.items():
-            if pattern.fullmatch(topic):
-                subscribers.extend(handlers)
-        return subscribers

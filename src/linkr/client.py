@@ -14,41 +14,41 @@ if TYPE_CHECKING:
     from .app import App
 
 
+def _norm_timeout(value: float | None) -> float | None:
+    if value is None:
+        return None
+    return max(float(value), 0.0)
+
+
 class Client:
     """Client-side API for :class:`App` (call/send/emit and request pipeline)."""
 
     def __init__(
         self,
         app: App,
-        rpc_timeout: float,
-        rpc_ttl: float,
-        rpc_rttl: float,
-        task_timeout: float,
-        task_ttl: float,
-        event_ttl: float,
+        rpc_client_timeout: float | None,
+        rpc_server_timeout: float | None,
+        rpc_ttl: float | None,
+        rpc_rttl: float | None,
+        task_client_timeout: float | None,
+        task_server_timeout: float | None,
+        task_ttl: float | None,
+        event_client_timeout: float | None,
+        event_ttl: float | None,
     ) -> None:
-        """
-        Create a client for an application.
-
-        Args:
-            app: Owning application instance.
-            rpc_timeout: Default RPC handler timeout.
-            rpc_ttl: Default RPC request time-to-live.
-            rpc_rttl: Default RPC response time-to-live.
-            task_timeout: Default task handler timeout.
-            task_ttl: Default task time-to-live.
-            event_ttl: Default event time-to-live.
-        """
         self._app = app
         self._serializer = app.serializers[0]
         self._serializers_map = {s.name: s for s in app.serializers}
         self._app_mw = app.app_middlewares
         self._wire_mw = app.wire_middlewares
-        self._rpc_timeout = rpc_timeout
+        self._rpc_client_timeout = _norm_timeout(rpc_client_timeout)
+        self._rpc_server_timeout = _norm_timeout(rpc_server_timeout)
         self._rpc_ttl = rpc_ttl
         self._rpc_rttl = rpc_rttl
-        self._task_timeout = task_timeout
+        self._task_client_timeout = _norm_timeout(task_client_timeout)
+        self._task_server_timeout = _norm_timeout(task_server_timeout)
         self._task_ttl = task_ttl
+        self._event_client_timeout = _norm_timeout(event_client_timeout)
         self._event_ttl = event_ttl
 
     # ------------------------------------------------------------------
@@ -71,39 +71,33 @@ class Client:
         kwds: dict[str, Any],
         *,
         request_id: UUID | None = None,
-        timeout: float | None = None,
+        client_timeout: float | None = None,
+        server_timeout: float | None = None,
         ttl: float | None = None,
         rttl: float | None = None,
         serializer: str | None = None,
         context: dict[str, Any] | None = None,
     ) -> Any:
-        """
-        Invoke an RPC method and return its result.
-
-        Args:
-            method: Fully qualified RPC method name (e.g. ``"app.service.add"``).
-            args: Positional arguments passed to the remote handler.
-            kwds: Keyword arguments passed to the remote handler.
-            request_id: Optional request identifier.
-            timeout: Handler execution timeout override in seconds.
-            ttl: Request time-to-live override in seconds.
-            rttl: Response time-to-live override in seconds.
-            serializer: Serializer name to use for this request.
-            context: Backend-specific publish/context metadata.
-
-        Returns:
-            The value returned by the remote RPC handler.
-        """
+        if self._app.is_closed:
+            raise RuntimeError("App is closed")
+        effective_client_timeout = _norm_timeout(
+            client_timeout if client_timeout is not None else self._rpc_client_timeout
+        )
         request = self._build_rpc_request(
             method,
             args,
             kwds,
             request_id=request_id,
-            timeout=timeout,
+            server_timeout=server_timeout,
             ttl=ttl,
             rttl=rttl,
         )
-        return await self._invoke_rpc_request(request, serializer=serializer, context=context)
+        return await self._invoke_rpc_request(
+            request,
+            client_timeout=effective_client_timeout,
+            serializer=serializer,
+            context=context,
+        )
 
     async def send(
         self,
@@ -112,33 +106,31 @@ class Client:
         kwds: dict[str, Any],
         *,
         request_id: UUID | None = None,
-        timeout: float | None = None,
+        client_timeout: float | None = None,
+        server_timeout: float | None = None,
         ttl: float | None = None,
         serializer: str | None = None,
         context: dict[str, Any] | None = None,
     ) -> None:
-        """
-        Send a task for asynchronous execution without waiting for a result.
-
-        Args:
-            task: Fully qualified task name (e.g. ``"app.worker.process"``).
-            args: Positional arguments passed to the task handler.
-            kwds: Keyword arguments passed to the task handler.
-            request_id: Optional request identifier.
-            timeout: Handler execution timeout override in seconds.
-            ttl: Request time-to-live override in seconds.
-            serializer: Serializer name to use for this request.
-            context: Backend-specific publish/context metadata.
-        """
+        if self._app.is_closed:
+            raise RuntimeError("App is closed")
+        effective_client_timeout = _norm_timeout(
+            client_timeout if client_timeout is not None else self._task_client_timeout
+        )
         request = self._build_task_request(
             task,
             args,
             kwds,
             request_id=request_id,
-            timeout=timeout,
+            server_timeout=server_timeout,
             ttl=ttl,
         )
-        return await self._invoke_task_request(request, serializer=serializer, context=context)
+        return await self._invoke_task_request(
+            request,
+            client_timeout=effective_client_timeout,
+            serializer=serializer,
+            context=context,
+        )
 
     async def emit(
         self,
@@ -146,28 +138,28 @@ class Client:
         event: dict[str, Any],
         *,
         request_id: UUID | None = None,
+        client_timeout: float | None = None,
         ttl: float | None = None,
         serializer: str | None = None,
         context: dict[str, Any] | None = None,
     ) -> None:
-        """
-        Publish an event to a topic.
-
-        Args:
-            topic: Event topic or routing key.
-            event: Event payload delivered to subscribers as keyword arguments.
-            request_id: Optional request identifier.
-            ttl: Event time-to-live override in seconds.
-            serializer: Serializer name to use for this request.
-            context: Backend-specific publish/context metadata.
-        """
+        if self._app.is_closed:
+            raise RuntimeError("App is closed")
+        effective_client_timeout = _norm_timeout(
+            client_timeout if client_timeout is not None else self._event_client_timeout
+        )
         request = self._build_event_request(
             topic,
             event,
             request_id=request_id,
             ttl=ttl,
         )
-        return await self._invoke_event_request(request, serializer=serializer, context=context)
+        return await self._invoke_event_request(
+            request,
+            client_timeout=effective_client_timeout,
+            serializer=serializer,
+            context=context,
+        )
 
     # ------------------------------------------------------------------
     # Client request builders
@@ -180,33 +172,28 @@ class Client:
         kwds: dict[str, Any],
         *,
         request_id: UUID | None = None,
-        timeout: float | None = None,
+        server_timeout: float | None = None,
         ttl: float | None = None,
         rttl: float | None = None,
     ) -> Request:
         queue = self._resolve_queue(method)
-
         headers: dict[str, Any] = {"queue": queue}
-
-        timeout = timeout if timeout is not None else self._rpc_timeout
+        server_timeout = _norm_timeout(
+            server_timeout if server_timeout is not None else self._rpc_server_timeout
+        )
         ttl = ttl if ttl is not None else self._rpc_ttl
         rttl = rttl if rttl is not None else self._rpc_rttl
-
-        if timeout is not None:
-            headers["timeout"] = timeout
+        if server_timeout is not None:
+            headers["server_timeout"] = server_timeout
         if ttl is not None:
             headers["ttl"] = ttl
         if rttl is not None:
             headers["rttl"] = rttl
-
+        method_leaf = method.rsplit(".", 1)[-1] if "." in method else method
         return Request(
             id=request_id or uuid4(),
             type="rpc",
-            data={
-                "method": method.rsplit(".", 1)[-1],
-                "args": args,
-                "kwds": kwds,
-            },
+            data={"method": method_leaf, "args": list(args), "kwds": kwds},
             headers=headers,
         )
 
@@ -217,29 +204,24 @@ class Client:
         kwds: dict[str, Any],
         *,
         request_id: UUID | None = None,
-        timeout: float | None = None,
+        server_timeout: float | None = None,
         ttl: float | None = None,
     ) -> Request:
         queue = self._resolve_queue(task)
-
         headers: dict[str, Any] = {"queue": queue}
-
-        timeout = timeout if timeout is not None else self._task_timeout
+        server_timeout = _norm_timeout(
+            server_timeout if server_timeout is not None else self._task_server_timeout
+        )
         ttl = ttl if ttl is not None else self._task_ttl
-
-        if timeout is not None:
-            headers["timeout"] = timeout
+        if server_timeout is not None:
+            headers["server_timeout"] = server_timeout
         if ttl is not None:
             headers["ttl"] = ttl
-
+        task_leaf = task.rsplit(".", 1)[-1] if "." in task else task
         return Request(
             id=request_id or uuid4(),
             type="task",
-            data={
-                "task": task.rsplit(".", 1)[-1],
-                "args": args,
-                "kwds": kwds,
-            },
+            data={"task": task_leaf, "args": list(args), "kwds": kwds},
             headers=headers,
         )
 
@@ -252,402 +234,283 @@ class Client:
         ttl: float | None = None,
     ) -> Request:
         headers: dict[str, Any] = {}
-
         ttl = ttl if ttl is not None else self._event_ttl
         if ttl is not None:
             headers["ttl"] = ttl
-
         return Request(
             id=request_id or uuid4(),
             type="event",
-            data={
-                "topic": topic,
-                "event": event,
-            },
+            data={"topic": topic, "event": event},
             headers=headers,
         )
 
     # ------------------------------------------------------------------
-    # Client pipeline
+    # Client dispatch
     # ------------------------------------------------------------------
 
     async def _invoke_rpc_request(
         self,
         request: Request,
+        *,
+        client_timeout: float | None,
         serializer: str | None = None,
         context: dict[str, Any] | None = None,
     ) -> Any:
-        if self._app.is_closed:
-            raise RuntimeError("App is closed")
+        ser = self._get_serializer(serializer)
+        request_message = ser.dumps_request(request)
+        request_message.headers["serializer"] = ser.name
+        if context is None:
+            context = {}
 
-        _serializer = self._get_serializer(serializer)
-        _context = context or {}
-
-        client_timeout = (
-            max(float(request.headers.get("timeout") or 0) + float(request.headers.get("ttl") or 0), 0) or None
-        )
-
-        published = False
-        response_outcome: Literal["ok", "error", "timeout"] = "ok"
-        response_error: BaseException | None = None
-        response: Response | None = None
-        result: Any = None
-
-        ttl = request.headers.get("ttl")
-
-        # Fast path: no middleware
-        if not self._wire_mw and not self._app_mw:
-            request_message = _serializer.dumps_request(request)
-
-            if ttl is not None:
-                request_message.headers["ttl"] = ttl
-
-            future = await self._app.backend.request(request.headers["queue"], request_message, context=_context)
-            published = True
+        async def emit_published(outcome: Literal["ok", "error"], error: BaseException | None = None) -> None:
             if self._app.hooks.on_request_published:
                 await self._app.hooks.on_request_published.emit(
-                    RequestPublishedEvent(app=self._app.name, request=request, outcome="ok", error=None)
-                )
-            try:
-                async with asyncio.timeout(client_timeout):
-                    res_message = await future
-            except TimeoutError as exc:
-                response_outcome = "timeout"
-                response_error = RPCError(
-                    error_code=ErrorCode.TIMEOUT,
-                    error_message="RPC call timed out waiting for response",
-                )
-                if self._app.hooks.on_response_received:
-                    await self._app.hooks.on_response_received.emit(
-                        ResponseReceivedEvent(
-                            app=self._app.name,
-                            request=request,
-                            response=None,
-                            outcome=response_outcome,
-                            error=response_error,
-                        )
-                    )
-                raise response_error from exc
-            if res_message is None:
-                return None
-            response = _serializer.loads_response(res_message)
-
-            if response is None:
-                result = None
-            elif response.type == "error" or (isinstance(response.data, dict) and "error_code" in response.data):
-                info = ErrorInfo.model_validate(response.data)
-                response_error = RPCError(
-                    error_code=info.error_code,
-                    error_message=info.error_message,
-                    error_details=info.error_details,
-                )
-                response_outcome = "timeout" if info.error_code == ErrorCode.TIMEOUT else "error"
-                if self._app.hooks.on_response_received:
-                    await self._app.hooks.on_response_received.emit(
-                        ResponseReceivedEvent(
-                            app=self._app.name,
-                            request=request,
-                            response=None,
-                            outcome=response_outcome,
-                            error=response_error,
-                        )
-                    )
-                raise response_error
-            else:
-                result = response.data
-            if self._app.hooks.on_response_received:
-                await self._app.hooks.on_response_received.emit(
-                    ResponseReceivedEvent(
+                    RequestPublishedEvent(
                         app=self._app.name,
                         request=request,
-                        response=result,
-                        outcome="ok",
-                        error=None,
+                        outcome=outcome,
+                        error=error,
                     )
                 )
-            return result
 
-        # Full pipeline with middleware
-        async def core() -> Response | None:
-            nonlocal published
-            request_message = _serializer.dumps_request(request)
-
-            if ttl is not None:
-                request_message.headers["ttl"] = ttl
-
-            async def backend_request() -> Message | None:
-                nonlocal published
-                future = await self._app.backend.request(request.headers["queue"], request_message, context=_context)
-                published = True
-                if self._app.hooks.on_request_published:
-                    await self._app.hooks.on_request_published.emit(
-                        RequestPublishedEvent(
-                            app=self._app.name,
-                            request=request,
-                            outcome="ok",
-                            error=None,
-                        )
-                    )
-                res_message = await future
-                return res_message
-
-            wire_handler = apply_middleware(
-                self._wire_mw,
-                backend_request,
-                lambda mw, n: wrap_wire_client(mw, n, request, request_message, _context),
+        async def emit_response_received(response: Response) -> None:
+            if not self._app.hooks.on_response_received:
+                return
+            if response.type == "error":
+                outcome: Literal["ok", "error", "timeout"] = "error"
+                if isinstance(response.data, ErrorInfo):
+                    outcome = "timeout" if response.data.error_code == ErrorCode.TIMEOUT else "error"
+                elif isinstance(response.data, dict):
+                    outcome = "timeout" if response.data.get("error_code") == ErrorCode.TIMEOUT else "error"
+            else:
+                outcome = "ok"
+            await self._app.hooks.on_response_received.emit(
+                ResponseReceivedEvent(
+                    app=self._app.name,
+                    request=request,
+                    response=response,
+                    outcome=outcome,
+                )
             )
 
-            res_message = await wire_handler()
-            if res_message is None:
-                return None
-            return _serializer.loads_response(res_message)
+        def make_timeout_response() -> Response:
+            return Response(
+                id=request.id,
+                type="error",
+                data=ErrorInfo(error_code=ErrorCode.TIMEOUT, error_message="Client wait timed out"),
+            )
 
-        handler = apply_middleware(
-            self._app_mw,
-            core,
-            lambda mw, n: wrap_app_client(mw, n, request, _context),
-        )
+        def make_missing_response() -> Response:
+            return Response(
+                id=request.id,
+                type="error",
+                data=ErrorInfo(error_code=ErrorCode.INTERNAL_ERROR, error_message="middleware returned no response"),
+            )
 
-        try:
+        async def backend_call_and_wait() -> Message:
+            try:
+                future = await self._app.backend.request(
+                    request.headers["queue"],
+                    request_message,
+                    context=context,
+                )
+            except Exception as exc:
+                await emit_published("error", exc)
+                raise
+            await emit_published("ok")
 
             try:
-                async with asyncio.timeout(client_timeout):
-                    response = await handler()
+                if client_timeout is None:
+                    response_message = await future
+                else:
+                    response_message = await asyncio.wait_for(future, client_timeout)
             except TimeoutError as exc:
-                response_outcome = "timeout"
-                response_error = RPCError(
+                await emit_response_received(make_timeout_response())
+                raise RPCError(
                     error_code=ErrorCode.TIMEOUT,
-                    error_message="RPC call timed out waiting for response",
-                )
-                raise response_error from exc
+                    error_message="Client wait timed out",
+                ) from exc
+            return response_message
 
-            if response is None:
-                result = None
-            elif response.type == "error" or (isinstance(response.data, dict) and "error_code" in response.data):
-                info = ErrorInfo.model_validate(response.data)
-                response_error = RPCError(
-                    error_code=info.error_code,
-                    error_message=info.error_message,
-                    error_details=info.error_details,
-                )
-                response_outcome = "timeout" if info.error_code == ErrorCode.TIMEOUT else "error"
-                raise response_error
-            else:
-                result = response.data
-            if self._app.hooks.on_response_received:
-                await self._app.hooks.on_response_received.emit(
-                    ResponseReceivedEvent(
-                        app=self._app.name,
-                        request=request,
-                        response=result,
-                        outcome="ok",
-                        error=None,
-                    )
-                )
-            return result
-        except BaseException as exc:
-            if not published:
-                if self._app.hooks.on_request_published:
-                    err = exc if isinstance(exc, BaseException) else Exception(str(exc))
-                    await self._app.hooks.on_request_published.emit(
-                        RequestPublishedEvent(
-                            app=self._app.name,
-                            request=request,
-                            outcome="error",
-                            error=err,
-                        )
-                    )
-            else:
-                if response_error is None:
-                    response_outcome = "error"
-                    response_error = exc
-                if self._app.hooks.on_response_received:
-                    await self._app.hooks.on_response_received.emit(
-                        ResponseReceivedEvent(
-                            app=self._app.name,
-                            request=request,
-                            response=None,
-                            outcome=response_outcome,
-                            error=response_error,
-                        )
-                    )
-            raise
+        if not self._wire_mw and not self._app_mw:
+            response_message = await backend_call_and_wait()
+            resp_ser_name = response_message.headers.get("serializer")
+            resp_ser = self._get_serializer(resp_ser_name) if resp_ser_name else ser
+            response = resp_ser.loads_response(response_message)
+            await emit_response_received(response)
+            return self._unpack_rpc_response(response)
+
+        wire_handler = apply_middleware(
+            self._wire_mw,
+            backend_call_and_wait,
+            lambda mw, n: wrap_wire_client(mw, n, request, request_message, context),
+        )
+
+        async def app_backend() -> Response | None:
+            response_message = await wire_handler()
+            if response_message is None:
+                await emit_response_received(make_missing_response())
+                raise RPCError(error_code=ErrorCode.INTERNAL_ERROR, error_message="middleware returned no response")
+            resp_ser_name = response_message.headers.get("serializer")
+            resp_ser = self._get_serializer(resp_ser_name) if resp_ser_name else ser
+            return resp_ser.loads_response(response_message)
+
+        app_handler = apply_middleware(
+            self._app_mw,
+            app_backend,
+            lambda mw, n: wrap_app_client(mw, n, request, context),
+        )
+
+        resp = await app_handler()
+        if resp is None:
+            await emit_response_received(make_missing_response())
+            raise RPCError(error_code=ErrorCode.INTERNAL_ERROR, error_message="middleware returned no response")
+        await emit_response_received(resp)
+        return self._unpack_rpc_response(resp)
 
     async def _invoke_task_request(
         self,
         request: Request,
+        *,
+        client_timeout: float | None,
         serializer: str | None = None,
         context: dict[str, Any] | None = None,
     ) -> None:
-        if self._app.is_closed:
-            raise RuntimeError("App is closed")
+        ser = self._get_serializer(serializer)
+        request_message = ser.dumps_request(request)
+        request_message.headers["serializer"] = ser.name
+        if context is None:
+            context = {}
 
-        _serializer = self._get_serializer(serializer)
-        _context = context or {}
-        published = False
-
-        ttl = request.headers.get("ttl")
-
-        # Fast path: no middleware
-        if not self._wire_mw and not self._app_mw:
-            request_message = _serializer.dumps_request(request)
-
-            if ttl is not None:
-                request_message.headers["ttl"] = ttl
-
-            await self._app.backend.send(request.headers["queue"], request_message, context=_context)
-            published = True
+        async def emit_published(outcome: Literal["ok", "error"], error: BaseException | None = None) -> None:
             if self._app.hooks.on_request_published:
                 await self._app.hooks.on_request_published.emit(
                     RequestPublishedEvent(
                         app=self._app.name,
                         request=request,
-                        outcome="ok",
-                        error=None,
+                        outcome=outcome,
+                        error=error,
                     )
                 )
+
+        async def backend_call() -> None:
+            try:
+                if client_timeout is None:
+                    await self._app.backend.send(
+                        request.headers["queue"],
+                        request_message,
+                        context=context,
+                    )
+                else:
+                    await asyncio.wait_for(
+                        self._app.backend.send(
+                            request.headers["queue"],
+                            request_message,
+                            context=context,
+                        ),
+                        client_timeout,
+                    )
+            except TimeoutError as exc:
+                timeout_exc = RequestError(error_message="Task publish timed out")
+                await emit_published("error", timeout_exc)
+                raise timeout_exc from exc
+            except Exception as exc:
+                await emit_published("error", exc)
+                raise
+            await emit_published("ok")
+
+        if not self._wire_mw and not self._app_mw:
+            await backend_call()
             return
 
-        # Full pipeline with middleware
-        async def core() -> None:
-            nonlocal published
-            request_message = _serializer.dumps_request(request)
-
-            if ttl is not None:
-                request_message.headers["ttl"] = ttl
-
-            async def backend_send() -> Message | None:
-                nonlocal published
-                await self._app.backend.send(request.headers["queue"], request_message, context=_context)
-                published = True
-                if self._app.hooks.on_request_published:
-                    await self._app.hooks.on_request_published.emit(
-                        RequestPublishedEvent(
-                            app=self._app.name,
-                            request=request,
-                            outcome="ok",
-                            error=None,
-                        )
-                    )
-                return None
-
-            wire_handler = apply_middleware(
-                self._wire_mw,
-                backend_send,
-                lambda mw, n: wrap_wire_client(mw, n, request, request_message, _context),
-            )
-
-            await wire_handler()
-
-        handler = apply_middleware(
-            self._app_mw,
-            core,
-            lambda mw, n: wrap_app_client(mw, n, request, _context),
+        wire_handler = apply_middleware(
+            self._wire_mw,
+            backend_call,
+            lambda mw, n: wrap_wire_client(mw, n, request, request_message, context),
         )
 
-        try:
-            await handler()
-        except BaseException as exc:
-            if not published:
-                if self._app.hooks.on_request_published:
-                    err = exc
-                    await self._app.hooks.on_request_published.emit(
-                        RequestPublishedEvent(
-                            app=self._app.name,
-                            request=request,
-                            outcome="error",
-                            error=err,
-                        )
-                    )
-            raise
+        async def app_backend() -> Response | None:
+            await wire_handler()
+            return None
+
+        app_handler = apply_middleware(
+            self._app_mw,
+            app_backend,
+            lambda mw, n: wrap_app_client(mw, n, request, context),
+        )
+        await app_handler()
 
     async def _invoke_event_request(
         self,
         request: Request,
+        *,
+        client_timeout: float | None,
         serializer: str | None = None,
         context: dict[str, Any] | None = None,
     ) -> None:
-        if self._app.is_closed:
-            raise RuntimeError("App is closed")
+        ser = self._get_serializer(serializer)
+        request_message = ser.dumps_request(request)
+        request_message.headers["serializer"] = ser.name
+        if context is None:
+            context = {}
 
-        _serializer = self._get_serializer(serializer)
-        _context = context or {}
-        published = False
-
-        ttl = request.headers.get("ttl")
-
-        # Fast path: no middleware
-        if not self._wire_mw and not self._app_mw:
-            request_message = _serializer.dumps_request(request)
-
-            if ttl is not None:
-                request_message.headers["ttl"] = ttl
-
-            await self._app.backend.emit(request.data["topic"], request_message, context=_context)
-            published = True
+        async def emit_published(outcome: Literal["ok", "error"], error: BaseException | None = None) -> None:
             if self._app.hooks.on_request_published:
                 await self._app.hooks.on_request_published.emit(
                     RequestPublishedEvent(
                         app=self._app.name,
                         request=request,
-                        outcome="ok",
-                        error=None,
+                        outcome=outcome,
+                        error=error,
                     )
                 )
+
+        async def backend_call() -> None:
+            try:
+                if client_timeout is None:
+                    await self._app.backend.emit(
+                        request.data["topic"],
+                        request_message,
+                        context=context,
+                    )
+                else:
+                    await asyncio.wait_for(
+                        self._app.backend.emit(
+                            request.data["topic"],
+                            request_message,
+                            context=context,
+                        ),
+                        client_timeout,
+                    )
+            except TimeoutError as exc:
+                timeout_exc = RequestError(error_message="Event publish timed out")
+                await emit_published("error", timeout_exc)
+                raise timeout_exc from exc
+            except Exception as exc:
+                await emit_published("error", exc)
+                raise
+            await emit_published("ok")
+
+        if not self._wire_mw and not self._app_mw:
+            await backend_call()
             return
 
-        # Full pipeline with middleware
-        async def core() -> None:
-            nonlocal published
-            request_message = _serializer.dumps_request(request)
-
-            if ttl is not None:
-                request_message.headers["ttl"] = ttl
-
-            async def backend_emit() -> Message | None:
-                nonlocal published
-                await self._app.backend.emit(request.data["topic"], request_message, context=_context)
-                published = True
-                if self._app.hooks.on_request_published:
-                    await self._app.hooks.on_request_published.emit(
-                        RequestPublishedEvent(
-                            app=self._app.name,
-                            request=request,
-                            outcome="ok",
-                            error=None,
-                        )
-                    )
-                return None
-
-            wire_handler = apply_middleware(
-                self._wire_mw,
-                backend_emit,
-                lambda mw, n: wrap_wire_client(mw, n, request, request_message, _context),
-            )
-
-            await wire_handler()
-
-        handler = apply_middleware(
-            self._app_mw,
-            core,
-            lambda mw, n: wrap_app_client(mw, n, request, _context),
+        wire_handler = apply_middleware(
+            self._wire_mw,
+            backend_call,
+            lambda mw, n: wrap_wire_client(mw, n, request, request_message, context),
         )
 
-        try:
-            await handler()
-        except BaseException as exc:
-            if not published:
-                if self._app.hooks.on_request_published:
-                    err = exc
-                    await self._app.hooks.on_request_published.emit(
-                        RequestPublishedEvent(
-                            app=self._app.name,
-                            request=request,
-                            outcome="error",
-                            error=err,
-                        )
-                    )
-            raise
+        async def app_backend() -> Response | None:
+            await wire_handler()
+            return None
+
+        app_handler = apply_middleware(
+            self._app_mw,
+            app_backend,
+            lambda mw, n: wrap_app_client(mw, n, request, context),
+        )
+        await app_handler()
 
     # ------------------------------------------------------------------
     # Helpers
@@ -659,4 +522,23 @@ class Client:
         try:
             return self._serializers_map[name]
         except KeyError as exc:
-            raise RequestError(f"unknown serializer: {name}") from exc
+            raise RequestError(error_message=f"unknown serializer: {name}") from exc
+
+    @staticmethod
+    def _unpack_rpc_response(response: Response) -> Any:
+        if response.type == "error":
+            data = response.data
+            if isinstance(data, ErrorInfo):
+                raise RPCError(
+                    error_code=data.error_code,
+                    error_message=data.error_message,
+                    error_details=data.error_details,
+                )
+            if isinstance(data, dict):
+                raise RPCError(
+                    error_code=data.get("error_code", ErrorCode.INTERNAL_ERROR),
+                    error_message=data.get("error_message", "Internal server error"),
+                    error_details=data.get("error_details"),
+                )
+            raise RPCError(error_code=ErrorCode.INTERNAL_ERROR, error_message=str(data))
+        return response.data

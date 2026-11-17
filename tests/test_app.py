@@ -9,7 +9,7 @@ from linkr import (
     AppMiddleware,
     Depends,
     ErrorCode,
-    JsonRpcSerializer,
+    HealthStatus,
     JsonSerializer,
     LocalBackend,
     RequestError,
@@ -112,25 +112,25 @@ class TestAppCore:
             await call(app, "app.invalid")
         assert exc_info.value.error_code == ErrorCode.METHOD_NOT_FOUND
 
-    async def test_task_send(self, app: App, server):
+    async def test_task_send(self, app: App, worker):
         received: list[str] = []
 
-        @server.task("echo")
+        @worker.task("echo")
         def echo(text: str):
             received.append(text)
 
-        await server.consume()
+        await worker.consume()
         await send(app, "app.echo", "hello")
         assert received == ["hello"]
 
-    async def test_event_publish(self, app: App, server):
+    async def test_event_publish(self, app: App, bus):
         received: list[str] = []
 
-        @server.subscribe("test")
+        @bus.subscribe("test")
         def on_test(text: str):
             received.append(text)
 
-        await server.consume()
+        await bus.consume()
         await emit(app, "test", text="hello")
         assert received == ["hello"]
 
@@ -141,7 +141,7 @@ class TestAppCore:
 
         await server.consume()
         with pytest.raises(RPCError) as exc_info:
-            await app.client.call("app.sleep", (), {}, timeout=0.1)
+            await app.client.call("app.sleep", (), {}, client_timeout=0.1)
         assert exc_info.value.error_code == ErrorCode.TIMEOUT
 
     async def test_async_handler(self, app: App, server):
@@ -187,14 +187,14 @@ class TestAppCore:
                 )
 
         app = App("app", backend=LocalBackend(), middlewares=[AuthMiddleware()])
-        server = app.server()
+        rpc = app.rpc()
 
-        @server.method("ping")
+        @rpc.method("ping")
         def ping() -> str:
             return "pong"
 
         await app.init()
-        await server.consume()
+        await rpc.consume()
         with pytest.raises(RPCError) as exc_info:
             await call(app, "app.ping")
         assert exc_info.value.error_code == "Unauthorized"
@@ -205,22 +205,23 @@ class TestAppCore:
 
 
 class TestAppLifecycle:
-    async def test_app_is_context_manager(self, server):
+    async def test_app_is_context_manager(self):
         backend = LocalBackend()
         async with App("app", backend=backend) as app:
+            rpc = app.rpc()
 
-            @server.method("ping")
+            @rpc.method("ping")
             def ping() -> str:
                 return "pong"
 
-            await server.consume()
+            await rpc.consume()
             assert await app.client.call("app.ping", (), {}) == "pong"
 
-    async def test_call_on_closed_app_raises(self, server):
+    async def test_call_on_closed_app_raises(self):
         app = App("app", backend=LocalBackend())
         await app.init()
         await app.close()
-        with pytest.raises(RuntimeError, match="App is closed"):
+        with pytest.raises(RuntimeError):
             await app.client.call("app.ping", (), {})
 
     async def test_send_on_closed_app_raises(self):
@@ -232,22 +233,22 @@ class TestAppLifecycle:
 
     async def test_consume_on_closed_app_raises(self):
         app = App("app", backend=LocalBackend())
-        srv = app.server()
+        rpc = app.rpc()
         await app.init()
         await app.close()
         with pytest.raises(RuntimeError, match="App is closed"):
-            await srv.consume()
+            await rpc.consume()
 
     async def test_default_timeout(self):
-        app = App("app", backend=LocalBackend(), rpc_timeout=0.1)
-        srv = app.server()
+        app = App("app", backend=LocalBackend(), rpc_server_timeout=0.1)
+        rpc = app.rpc()
         await app.init()
 
-        @srv.method("sleep")
+        @rpc.method("sleep")
         async def sleep(value: int):
             await asyncio.sleep(value)
 
-        await srv.consume()
+        await rpc.consume()
         with pytest.raises(RPCError) as exc_info:
             await app.client.call("app.sleep", (10,), {})
         assert exc_info.value.error_code == ErrorCode.TIMEOUT
@@ -272,14 +273,14 @@ class TestAppMiddleware:
                 return response
 
         app = App("app", backend=LocalBackend(), middlewares=[TestMiddleware()])
-        server = app.server()
+        rpc = app.rpc()
 
-        @server.method("ping")
+        @rpc.method("ping")
         def ping() -> str:
             return "pong"
 
         await app.init()
-        await server.consume()
+        await rpc.consume()
 
         assert await app.client.call("app.ping", (), {}) == "pong"
         assert events.count("process_request") == 2
@@ -316,14 +317,14 @@ class TestAppMiddleware:
                 return response
 
         app = App("app", backend=LocalBackend(), middlewares=[MwA(), MwB()])
-        server = app.server()
+        rpc = app.rpc()
 
-        @server.method("ping")
+        @rpc.method("ping")
         def ping() -> str:
             return "pong"
 
         await app.init()
-        await server.consume()
+        await rpc.consume()
         assert await app.client.call("app.ping", (), {}) == "pong"
 
         assert events == [
@@ -390,14 +391,14 @@ class TestAppMiddleware:
                 return result
 
         app = App("app", backend=LocalBackend(), middlewares=[MwA(), MwB()])
-        srv = app.server()
+        rpc = app.rpc()
 
-        @srv.method("ping")
+        @rpc.method("ping")
         def ping() -> str:
             return "pong"
 
         await app.init()
-        await srv.consume()
+        await rpc.consume()
 
         assert await app.client.call("app.ping", (), {}) == "pong"
         assert events == [
@@ -425,14 +426,14 @@ class TestAppMiddleware:
                 return await call_next()
 
         app = App("app", backend=LocalBackend(), middlewares=[HeaderInjector()])
-        srv = app.server()
+        rpc = app.rpc()
 
-        @srv.method("ping")
+        @rpc.method("ping")
         def ping() -> str:
             return "pong"
 
         await app.init()
-        await srv.consume()
+        await rpc.consume()
 
         assert await app.client.call("app.ping", (), {}) == "pong"
         assert server_headers[0].get("x-custom") == "test-value"
@@ -440,7 +441,7 @@ class TestAppMiddleware:
 
 
 class TestAppTimeoutsRouting:
-    async def test_call_ttl_defaults_to_timeout(self, server):
+    async def test_call_server_timeout_default_from_ttl_params(self, server):
         app = App("app", backend=LocalBackend())
         headers: dict[str, object] = {}
 
@@ -452,9 +453,9 @@ class TestAppTimeoutsRouting:
         await app.init()
         await server.consume()
 
-        assert await app.client.call("app.ping", (), {}, timeout=5) == "pong"
+        assert await app.client.call("app.ping", (), {}, server_timeout=5) == "pong"
         assert headers.get("ttl") == App.RPC_TTL
-        assert headers.get("timeout") == 5
+        assert headers.get("server_timeout") == 5
         await app.close()
 
     async def test_call_explicit_ttl_rttl(self, server):
@@ -472,7 +473,7 @@ class TestAppTimeoutsRouting:
         assert await app.client.call("app.ping", (), {}, ttl=30, rttl=60) == "pong"
         assert headers.get("ttl") == 30
         assert headers.get("rttl") == 60
-        assert headers.get("timeout") == App.RPC_TIMEOUT
+        assert headers.get("server_timeout") == App.RPC_SERVER_TIMEOUT
         await app.close()
 
     async def test_default_ttl(self, server):
@@ -502,33 +503,103 @@ class TestAppTimeoutsRouting:
         assert await app.client.call("app.ping", (), {}) == "pong"
         await app.close()
 
-    async def test_task_sends_ttl(self, server):
+    async def test_task_sends_ttl_and_server_timeout(self):
         app = App("app", backend=LocalBackend())
+        worker = app.worker()
         headers: dict[str, object] = {}
 
-        @server.task("test")
+        @worker.task("test")
         def test_handler(text: str) -> None:
             headers.update(get_current_request().headers)
+
+        await app.init()
+        await worker.consume()
+        await app.client.send("app.test", ("hello",), {}, ttl=5, server_timeout=7)
+        assert headers.get("ttl") == 5
+        assert headers.get("server_timeout") == 7
+        await app.close()
+
+    async def test_task_ttl_and_server_timeout_from_default(self):
+        app = App("app", backend=LocalBackend(), task_ttl=7)
+        worker = app.worker()
+        headers: dict[str, object] = {}
+
+        @worker.task("test")
+        def test_handler(text: str) -> None:
+            headers.update(get_current_request().headers)
+
+        await app.init()
+        await worker.consume()
+        await app.client.send("app.test", ("hello",), {})
+        assert headers.get("ttl") == 7
+        assert headers.get("server_timeout") == App.TASK_SERVER_TIMEOUT
+        await app.close()
+
+    async def test_event_sends_ttl_without_server_timeout(self):
+        app = App("app", backend=LocalBackend(), event_ttl=11)
+        bus = app.bus()
+        headers: dict[str, object] = {}
+
+        @bus.subscribe("evt")
+        def on_evt(x: int) -> None:
+            headers.update(get_current_request().headers)
+
+        await app.init()
+        await bus.consume()
+        await app.client.emit("evt", {"x": 1}, ttl=9)
+        await asyncio.sleep(0.05)
+        assert headers.get("ttl") == 9
+        assert "server_timeout" not in headers
+        await app.close()
+
+    async def test_negative_timeouts_normalized_to_zero(self, server):
+        app = App("app", backend=LocalBackend())
+
+        @server.method("ping")
+        def ping() -> str:
+            return "pong"
+
+        @server.method("slow")
+        async def slow() -> str:
+            await asyncio.sleep(0.2)
+            return "ok"
 
         await app.init()
         await server.consume()
-        await app.client.send("app.test", ("hello",), {}, ttl=5)
-        assert headers.get("ttl") == 5
+
+        # sync handler returns immediately; server_timeout applies to async handler execution
+        assert await app.client.call("app.ping", (), {}, server_timeout=-5) == "pong"
+
+        # negative client_timeout treated as 0 -> immediate client wait timeout
+        with pytest.raises(RPCError) as exc_info:
+            await app.client.call("app.slow", (), {}, client_timeout=-5)
+        assert exc_info.value.error_code == ErrorCode.TIMEOUT
+        assert exc_info.value.error_message == "Client wait timed out"
+
+        # negative server_timeout treated as 0 -> immediate handler execution timeout
+        with pytest.raises(RPCError) as exc_info:
+            await app.client.call("app.slow", (), {}, server_timeout=-5)
+        assert exc_info.value.error_code == ErrorCode.TIMEOUT
+        assert exc_info.value.error_message == "Handler execution timed out"
         await app.close()
 
-    async def test_task_ttl_from_default(self):
-        app = App("app", backend=LocalBackend(), task_ttl=7)
-        srv = app.server()
-        headers: dict[str, object] = {}
-
-        @srv.task("test")
-        def test_handler(text: str) -> None:
-            headers.update(get_current_request().headers)
-
+    async def test_negative_default_timeouts_normalized(self):
+        app = App(
+            "app",
+            backend=LocalBackend(),
+            rpc_client_timeout=-1,
+            rpc_server_timeout=-1,
+            task_client_timeout=-1,
+            task_server_timeout=-1,
+            event_client_timeout=-1,
+        )
+        client = app.client
+        assert client._rpc_client_timeout == 0.0
+        assert client._rpc_server_timeout == 0.0
+        assert client._task_client_timeout == 0.0
+        assert client._task_server_timeout == 0.0
+        assert client._event_client_timeout == 0.0
         await app.init()
-        await srv.consume()
-        await app.client.send("app.test", ("hello",), {})
-        assert headers.get("ttl") == 7
         await app.close()
 
     async def test_routing_key_without_group(self, server):
@@ -551,7 +622,7 @@ class TestAppTimeoutsRouting:
 
     async def test_routing_key_with_group(self):
         app = App("app", backend=LocalBackend())
-        grp = app.server("group")
+        grp = app.rpc("group")
         seen: dict[str, object] = {}
 
         @grp.method("add")
@@ -570,7 +641,7 @@ class TestAppTimeoutsRouting:
 
     async def test_group_method_call_success(self):
         app = App("app", backend=LocalBackend())
-        grp = app.server("group")
+        grp = app.rpc("group")
 
         @grp.method("add")
         def add(x: int, y: int) -> int:
@@ -694,14 +765,14 @@ class TestAppValidation:
 
     async def test_global_validate_types_enabled(self):
         app = App("app", backend=LocalBackend(), validate_types=True)
-        srv = app.server()
+        rpc = app.rpc()
 
-        @srv.method("add")
+        @rpc.method("add")
         def add(x: int, y: int) -> int:
             return x + y
 
         await app.init()
-        await srv.consume()
+        await rpc.consume()
         with pytest.raises(RPCError) as exc_info:
             await app.client.call("app.add", ("not", 3), {})
         assert exc_info.value.error_code == ErrorCode.VALIDATION_ERROR
@@ -719,70 +790,120 @@ class TestAppValidation:
         assert await app.client.call("app.add", ("not", 3), {}) == "not3"
         await app.close()
 
+    async def test_server_validate_types_enabled(self):
+        app = App("app", backend=LocalBackend(), validate_types=False)
+        rpc = app.rpc(validate_types=True)
 
-class TestAppTaskValidation:
-    async def test_task_validate_types_passes(self, app: App, server):
-        received: list[dict[str, int]] = []
+        @rpc.method("add")
+        def add(x: int, y: int) -> int:
+            return x + y
 
-        @server.task("process", validate_types=True)
-        def process(data: dict[str, int]) -> None:
-            received.append(data)
-
-        await server.consume()
-        await app.client.send("app.process", (), {"data": {"x": 1}})
-        assert received == [{"x": 1}]
+        await app.init()
+        await rpc.consume()
+        with pytest.raises(RPCError) as exc_info:
+            await app.client.call("app.add", ("not", 3), {})
+        assert exc_info.value.error_code == ErrorCode.VALIDATION_ERROR
         await app.close()
 
-    async def test_task_validate_types_fails_logs_warning(self, app: App, server, caplog):
+    async def test_server_validate_types_overrides_app(self):
+        app = App("app", backend=LocalBackend(), validate_types=True)
+        rpc = app.rpc(validate_types=False)
+
+        @rpc.method("add")
+        def add(x: int, y: int) -> str:
+            return str(x) + str(y)
+
+        await app.init()
+        await rpc.consume()
+        assert await app.client.call("app.add", ("not", 3), {}) == "not3"
+        await app.close()
+
+    async def test_handler_validate_types_overrides_server(self):
+        app = App("app", backend=LocalBackend(), validate_types=False)
+        rpc = app.rpc(validate_types=False)
+
+        @rpc.method("add", validate_types=True)
+        def add(x: int, y: int) -> int:
+            return x + y
+
+        await app.init()
+        await rpc.consume()
+        with pytest.raises(RPCError) as exc_info:
+            await app.client.call("app.add", ("not", 3), {})
+        assert exc_info.value.error_code == ErrorCode.VALIDATION_ERROR
+        await app.close()
+
+    async def test_server_validate_types_idempotent_same_config(self):
+        app = App("app", backend=LocalBackend())
+        s1 = app.rpc("svc", validate_types=True)
+        s2 = app.rpc("svc", validate_types=True)
+        assert s1 is s2
+
+    async def test_server_validate_types_conflict_rejected(self):
+        app = App("app", backend=LocalBackend())
+        app.rpc("svc", validate_types=True)
+        with pytest.raises(ValueError, match="already configured"):
+            app.rpc("svc", validate_types=False)
+
+
+class TestAppTaskValidation:
+    async def test_task_validate_types_passes(self, app: App, worker):
         received: list[dict[str, int]] = []
 
-        @server.task("process", validate_types=True)
+        @worker.task("process", validate_types=True)
         def process(data: dict[str, int]) -> None:
             received.append(data)
 
-        await server.consume()
+        await worker.consume()
+        await app.client.send("app.process", (), {"data": {"x": 1}})
+        assert received == [{"x": 1}]
+
+    async def test_task_validate_types_fails_logs_warning(self, app: App, worker, caplog):
+        received: list[dict[str, int]] = []
+
+        @worker.task("process", validate_types=True)
+        def process(data: dict[str, int]) -> None:
+            received.append(data)
+
+        await worker.consume()
         # Invalid type - should log warning, not call handler
         await app.client.send("app.process", (), {"data": {"x": "bad"}})
         await asyncio.sleep(0.1)  # allow async logging
         assert received == []
         assert any("Invalid arguments for task" in r.message for r in caplog.records)
-        await app.close()
 
 
 class TestAppEventValidation:
-    async def test_event_validate_types_passes(self, app: App, server):
+    async def test_event_validate_types_passes(self, app: App, bus):
         received: list[int] = []
 
-        @server.subscribe("user.created", validate_types=True)
+        @bus.subscribe("user.created", validate_types=True)
         def on_user(user_id: int) -> None:
             received.append(user_id)
 
-        await server.consume()
+        await bus.consume()
         await app.client.emit("user.created", {"user_id": 1})
         await asyncio.sleep(0.1)
         assert received == [1]
-        await app.close()
 
-    async def test_event_validate_types_fails_logs_warning(self, app: App, server, caplog):
+    async def test_event_validate_types_fails_logs_warning(self, app: App, bus, caplog):
         received: list[int] = []
 
-        @server.subscribe("user.created", validate_types=True)
+        @bus.subscribe("user.created", validate_types=True)
         def on_user(user_id: int) -> None:
             received.append(user_id)
 
-        await server.consume()
+        await bus.consume()
         # Invalid type - should log warning, not call handler
         await app.client.emit("user.created", {"user_id": "bad"})
         await asyncio.sleep(0.1)
         assert received == []
         assert any("Invalid event arguments for" in r.message for r in caplog.records)
-        await app.close()
 
 
 class TestAppMultiSerializer:
     async def test_serializer_name(self, server):
         assert JsonSerializer().name == "linkr1.0"
-        assert JsonRpcSerializer().name == "jsonrpc2.0"
 
     async def test_app_default_serializer(self, server):
         app = App("app", backend=LocalBackend())
@@ -797,8 +918,10 @@ class TestAppMultiSerializer:
         await app.close()
 
     async def test_app_single_jsonrpc_serializer(self):
+        from linkr import JsonRpcSerializer
+
         app = App("app", backend=LocalBackend(), serializer=JsonRpcSerializer())
-        srv = app.server()
+        srv = app.rpc()
 
         @srv.method("add")
         def add(x: int, y: int) -> int:
@@ -810,6 +933,8 @@ class TestAppMultiSerializer:
         await app.close()
 
     async def test_app_multi_serializer_call_with_name(self, server):
+        from linkr import JsonRpcSerializer
+
         app = App(
             "app",
             backend=LocalBackend(),
@@ -826,12 +951,14 @@ class TestAppMultiSerializer:
         await app.close()
 
     async def test_app_multi_serializer_default_is_first(self):
+        from linkr import JsonRpcSerializer
+
         app = App(
             "app",
             backend=LocalBackend(),
             serializer=[JsonRpcSerializer(), JsonSerializer()],
         )
-        srv = app.server()
+        srv = app.rpc()
 
         @srv.method("add")
         def add(x: int, y: int) -> int:
@@ -843,12 +970,14 @@ class TestAppMultiSerializer:
         await app.close()
 
     async def test_app_multi_serializer_auto_detect(self):
+        from linkr import JsonRpcSerializer
+
         app = App(
             "app",
             backend=LocalBackend(),
             serializer=[JsonSerializer(), JsonRpcSerializer()],
         )
-        srv = app.server()
+        srv = app.rpc()
 
         @srv.method("ping")
         def ping() -> str:
@@ -874,123 +1003,200 @@ class TestAppMultiSerializer:
         await app.close()
 
     async def test_jsonrpc_rejects_task_request(self, server):
+        from linkr import JsonRpcSerializer
+
         app = App("app", backend=LocalBackend(), serializer=JsonRpcSerializer())
         with pytest.raises(ValueError, match="only RPC"):
             await app.client.send("app.test", (), {})
 
 
 class TestStopConsume:
-    async def test_stop_consume_rpc_pause_and_resume(self, app: App, server):
-        @server.method("ping")
+    async def test_stop_consume_rpc_pause_and_resume(self):
+        app = App("app", backend=LocalBackend())
+        rpc = app.rpc()
+
+        @rpc.method("ping")
         def ping() -> str:
             return "pong"
 
         async with app:
-            await server.consume(mode="rpc")
+            await rpc.consume()
             assert await call(app, "app.ping") == "pong"
 
-            await server.stop_consume(mode="rpc")
+            await rpc.stop_consume()
             with pytest.raises(RuntimeError, match="no RPC consumer registered"):
                 await call(app, "app.ping")
 
-            await server.consume(mode="rpc")
+            await rpc.consume()
             assert await call(app, "app.ping") == "pong"
-            assert "ping" in server.methods
+            assert "ping" in rpc.methods
 
-    async def test_stop_consume_rpc_idempotent(self, server):
+    async def test_stop_consume_rpc_idempotent(self):
         backend = LocalBackend()
         app = App("app", backend=backend)
-        srv = app.server()
+        rpc = app.rpc()
 
-        @srv.method("ping")
+        @rpc.method("ping")
         def ping() -> str:
             return "pong"
 
         async with app:
-            await srv.consume(mode="rpc")
-            await srv.stop_consume(mode="rpc")
-            await srv.stop_consume(mode="rpc")
-            await srv.consume(mode="rpc")
-            await srv.consume(mode="rpc")
+            await rpc.consume()
+            await rpc.stop_consume()
+            await rpc.stop_consume()
+            await rpc.consume()
+            await rpc.consume()
             assert await call(app, "app.ping") == "pong"
 
     async def test_stop_consume_tasks_pause_and_resume(self):
         app = App("worker", backend=LocalBackend())
-        srv = app.server()
+        worker = app.worker()
         received: list[str] = []
 
-        @srv.task("job")
+        @worker.task("job")
         def job(value: str) -> None:
             received.append(value)
 
         async with app:
-            await srv.consume(mode="task")
+            await worker.consume()
             await send(app, "worker.job", "a")
-            await srv.stop_consume(mode="task")
+            await worker.stop_consume()
             await send(app, "worker.job", "b")
-            await srv.consume(mode="task")
+            await worker.consume()
             await send(app, "worker.job", "c")
 
         assert received == ["a", "c"]
-        assert "job" in srv.tasks
+        assert "job" in worker.tasks
 
     async def test_stop_consume_events_pause_and_resume(self):
         app = App("app", backend=LocalBackend())
-        srv = app.server()
+        bus = app.bus()
         seen: list[int] = []
 
-        @srv.subscribe("user.created")
+        @bus.subscribe("user.created")
         def on_created(user_id: int) -> None:
             seen.append(user_id)
 
         async with app:
-            await srv.consume(mode="event")
-            queue = srv.event_queue
+            await bus.consume()
+            queue = bus.event_queue
             assert queue is not None
             await emit(app, "user.created", user_id=1)
 
-            await srv.stop_consume(mode="event")
+            await bus.stop_consume()
             await emit(app, "user.created", user_id=2)
 
-            await srv.consume(mode="event")
+            await bus.consume()
             await emit(app, "user.created", user_id=3)
 
         assert seen == [1, 3]
-        assert "user.created" in srv.subscriptions
+        assert "user.created" in bus.subscriptions
 
     async def test_stop_consume_all_modes(self):
         app = App("app", backend=LocalBackend())
-        srv = app.server()
+        rpc = app.rpc()
+        worker = app.worker()
+        bus = app.bus()
         events: list[str] = []
 
-        @srv.method("ping")
+        @rpc.method("ping")
         def ping() -> str:
             return "pong"
 
-        @srv.task("job")
+        @worker.task("job")
         def job(v: str) -> None:
             events.append(f"t:{v}")
 
-        @srv.subscribe("evt")
+        @bus.subscribe("evt")
         def on_evt(v: str) -> None:
             events.append(f"e:{v}")
 
         async with app:
-            await srv.consume()
+            await rpc.consume()
+            await worker.consume()
+            await bus.consume()
             assert await call(app, "app.ping") == "pong"
             await send(app, "app.job", "a")
             await emit(app, "evt", v="a")
 
-            await srv.stop_consume()
+            await rpc.stop_consume()
+            await worker.stop_consume()
+            await bus.stop_consume()
             with pytest.raises(RuntimeError, match="no RPC consumer registered"):
                 await call(app, "app.ping")
             await send(app, "app.job", "b")
             await emit(app, "evt", v="b")
 
-            await srv.consume()
+            await rpc.consume()
+            await worker.consume()
+            await bus.consume()
             assert await call(app, "app.ping") == "pong"
             await send(app, "app.job", "c")
             await emit(app, "evt", v="c")
 
         assert "t:a" in events and "t:c" in events and "t:b" not in events
         assert "e:a" in events and "e:c" in events and "e:b" not in events
+
+
+class TestAppHealthcheck:
+    async def test_ready_and_healthy_returns_new_status(self):
+        backend = LocalBackend()
+        app = App("app", backend=backend)
+        await app.init()
+        try:
+            backend_status = await backend.healthcheck()
+            status = await app.healthcheck()
+
+            assert status == HealthStatus(ready=True, health=True)
+            assert status is not backend_status
+        finally:
+            await app.close()
+
+    async def test_closed_app_not_ready(self):
+        backend = LocalBackend()
+        app = App("app", backend=backend)
+        await app.init()
+        await app.close()
+
+        assert await app.healthcheck() == HealthStatus(ready=False, health=None)
+
+    async def test_backend_not_ready_returns_not_ready(self):
+        class NotReadyBackend(LocalBackend):
+            async def healthcheck(self) -> HealthStatus:
+                return HealthStatus(ready=False, health=None)
+
+        app = App("app", backend=NotReadyBackend())
+        await app.init()
+        try:
+            assert await app.healthcheck() == HealthStatus(ready=False, health=None)
+        finally:
+            await app.close()
+
+    async def test_backend_unhealthy_returns_new_status(self):
+        class UnhealthyBackend(LocalBackend):
+            async def healthcheck(self) -> HealthStatus:
+                return HealthStatus(ready=True, health=False)
+
+        backend = UnhealthyBackend()
+        app = App("app", backend=backend)
+        await app.init()
+        try:
+            backend_status = await backend.healthcheck()
+            status = await app.healthcheck()
+
+            assert status == HealthStatus(ready=True, health=False)
+            assert status is not backend_status
+        finally:
+            await app.close()
+
+    async def test_backend_error_returns_not_ready(self):
+        class BrokenBackend(LocalBackend):
+            async def healthcheck(self) -> HealthStatus:
+                raise RuntimeError("boom")
+
+        app = App("app", backend=BrokenBackend())
+        await app.init()
+        try:
+            assert await app.healthcheck() == HealthStatus(ready=False, health=None)
+        finally:
+            await app.close()

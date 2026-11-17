@@ -73,6 +73,14 @@ class HandlerInfo:
     validation_param_names: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class HealthStatus:
+    """Readiness and health status."""
+
+    ready: bool
+    health: bool | None
+
+
 class QueueOptions:
     """Marker base class for backend-specific queue/consumer options.
 

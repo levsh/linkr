@@ -4,22 +4,22 @@ Handler names and event topics determine which queue receives a message and how 
 
 ## Servers, queues, and local handler names
 
-`App` is the client/infrastructure; `Server` is a server scope bound to a queue.
+`App` is the client/infrastructure; `RPC`, `Worker`, and `Bus` are mode servers bound to a queue scope.
 
-- `root = app.server()` → base queue `app.name`
-- `group = app.server("group")` → base queue `f"{app.name}.group"`
+- `rpc = app.rpc()` / `worker = app.worker()` / `bus = app.bus()` → base queue `app.name`
+- `rpc = app.rpc("group")` (etc.) → base queue `f"{app.name}.group"`
 
-Handlers are registered on a server with **local (leaf) names** (no `.`):
+Handlers are registered on a mode server with **local (leaf) names** (no `.`):
 
 ```python
 app = App("orders", backend=backend)
-root = app.server()
-group = app.server("serviceA")
+rpc = app.rpc()
+group_rpc = app.rpc("serviceA")
 
-@root.method("foo")        # queue "orders", leaf "foo"   -> FQ "orders.foo"
+@rpc.method("foo")        # queue "orders", leaf "foo"   -> FQ "orders.foo"
 async def foo() -> None: ...
 
-@group.method("foo")       # queue "orders.serviceA", leaf "foo" -> FQ "orders.serviceA.foo"
+@group_rpc.method("foo")   # queue "orders.serviceA", leaf "foo" -> FQ "orders.serviceA.foo"
 async def group_foo() -> None: ...
 ```
 
@@ -44,46 +44,45 @@ Pass the fully qualified path expected by the target server/queue. A plain name 
 
 ## Shared handlers on the same server queue
 
-Multiple handlers registered on the same server share that server's queue and are dispatched by leaf name:
+Multiple handlers registered on the same mode server share that server's queue and are dispatched by leaf name:
 
 ```python
-root = app.server()
+rpc = app.rpc()
 
-@root.method("foo")
+@rpc.method("foo")
 def foo(): ...
 
-@root.method("bar")
+@rpc.method("bar")
 def bar(): ...
 # both on queue "orders"
 ```
 
 ## Consuming and stopping
 
-Consuming is controlled per server and per mode:
+Consuming is controlled per mode server:
 
 ```python
-server = app.server()
+rpc = app.rpc()
 
-await server.consume()                # rpc + task + event for this server
-await server.consume(mode="rpc")
-await server.stop_consume(mode="rpc") # pause; registrations remain, can consume again
+await rpc.consume()       # start consuming for this RPC server
+await rpc.stop_consume()  # pause; registrations remain, can consume again
 ```
 
-There is no per-method/task stop in the server API and no global `app.consume()/stop_consume()`.
+There is no per-method/task stop in the server API, no mode argument, and no global `app.consume()/stop_consume()`.
 
 ## Event topics and subscriptions
 
-Events are routed by **topic** and delivered to server subscriptions whose patterns match.
+Events are routed by **topic** and delivered to bus subscriptions whose patterns match.
 
 ```python
-server = app.server()
+bus = app.bus()
 
-@server.subscribe("user.created")
+@bus.subscribe("user.created")
 def on_created(user_id: int) -> None:
     ...
 
 await app.init()
-await server.consume(mode="event")
+await bus.consume()
 await app.client.emit("user.created", {"user_id": 1})
 ```
 
@@ -92,9 +91,9 @@ await app.client.emit("user.created", {"user_id": 1})
 - `*` matches **exactly one** segment: `user.*` matches `user.created`, not `user.profile.updated`.
 - `#` matches **zero or more** segments: `user.#` matches `user.created` and `user.profile.updated`.
 
-### Per-server event queues
+### Per-bus event queues
 
-Each server has its own event queue (scoped to `server.queue_base` and the app instance). Subscriptions registered on a server are bound/consumed only on that server's event queue. Different servers that subscribe to a matching topic each receive the event on their own queue.
+Each `Bus` has its own event queue (scoped to `bus.queue_base` and the app instance). Subscriptions registered on a bus are bound/consumed only on that bus's event queue. Different buses that subscribe to a matching topic each receive the event on their own queue.
 
 ## Backend queue naming (transport)
 

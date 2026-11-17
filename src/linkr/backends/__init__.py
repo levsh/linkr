@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
-from ..models import Message, QueueOptions, RequestType
+from ..models import HealthStatus, Message, QueueOptions, RequestType
 
 Mode = RequestType
 Handler = Callable[[Message], Awaitable[Message | None]]
@@ -194,3 +194,7 @@ class Backend(ABC):
             message: Serialized event message.
             context: Backend-specific publish/context metadata.
         """
+
+    @abstractmethod
+    async def healthcheck(self) -> HealthStatus:
+        """Return backend readiness and health status."""

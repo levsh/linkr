@@ -2,7 +2,7 @@
 
 This quickstart shows the three delivery modes using `LocalBackend` (in-process, no broker required).
 
-`App` provides lifecycle/client APIs; `Server` owns handler registration and consuming.
+`App` provides lifecycle/client APIs; `RPC`/`Worker`/`Bus` servers own handler registration and consuming per mode.
 
 ## RPC: request and response
 
@@ -14,13 +14,13 @@ from linkr import App, LocalBackend
 
 async def main() -> None:
     async with App("orders", backend=LocalBackend()) as app:
-        server = app.server()
+        rpc = app.rpc()
 
-        @server.method("add")
+        @rpc.method("add")
         def add(x: int, y: int) -> int:
             return x + y
 
-        await server.consume(mode="rpc")
+        await rpc.consume()
         result = await app.client.call("orders.add", (2, 3), {})
         print(result)  # 5
 
@@ -28,8 +28,8 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-- Register on a server with `@server.method(...)` (local leaf name).
-- Start consuming with `await server.consume(...)` (or `mode="rpc"`).
+- Register on an RPC server with `@rpc.method(...)` (local leaf name).
+- Start consuming with `await rpc.consume()`.
 - Call with `await app.client.call(name, args_tuple, kwds_dict)` using the queue-qualified path.
 
 ## Task: fire-and-forget
@@ -44,13 +44,13 @@ async def main() -> None:
     received: list[int] = []
 
     async with App("worker", backend=LocalBackend()) as app:
-        server = app.server("email")
+        worker = app.worker("email")
 
-        @server.task("send")
+        @worker.task("send")
         async def send_email(user_id: int) -> None:
             received.append(user_id)
 
-        await server.consume(mode="task")
+        await worker.consume()
         await app.client.send("worker.email.send", (), {"user_id": 42})
         await asyncio.sleep(0)  # let the task handler run
 
@@ -60,7 +60,7 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-- Register with `@server.task(...)`.
+- Register with `@worker.task(...)`.
 - Send with `await app.client.send(name, args_tuple, kwds_dict)`.
 - No response is returned; exactly one consumer handles each task when consumers compete on the same queue.
 
@@ -76,13 +76,13 @@ async def main() -> None:
     seen: list[int] = []
 
     async with App("billing", backend=LocalBackend()) as app:
-        server = app.server()
+        bus = app.bus()
 
-        @server.subscribe("user.created")
+        @bus.subscribe("user.created")
         def on_user_created(user_id: int) -> None:
             seen.append(user_id)
 
-        await server.consume(mode="event")
+        await bus.consume()
         await app.client.emit("user.created", {"user_id": 7})
         await asyncio.sleep(0)  # let subscriber run
 
@@ -92,9 +92,9 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-- Register with `@server.subscribe(topic_pattern)`.
+- Register with `@bus.subscribe(topic_pattern)`.
 - Emit with `await app.client.emit(topic, event_dict)` (payload is passed as keyword arguments).
-- Each server has its own event queue; matching subscribers on consuming servers receive the event.
+- Each bus has its own event queue; matching subscribers on consuming buses receive the event.
 
 ## Cross-app example (same backend)
 
@@ -108,14 +108,14 @@ async def main() -> None:
     backend = LocalBackend()
     server_app = App("server", backend=backend)
     client_app = App("client", backend=backend)
-    srv = server_app.server()
+    rpc = server_app.rpc()
 
-    @srv.method("ping")
+    @rpc.method("ping")
     def ping() -> str:
         return "pong"
 
     async with server_app, client_app:
-        await srv.consume(mode="rpc")
+        await rpc.consume()
         print(await client_app.client.call("server.ping", (), {}))  # pong
 
 

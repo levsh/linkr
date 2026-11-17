@@ -8,29 +8,23 @@ Async messaging framework with three delivery modes: RPC, task and event.
 pip install linkr
 ```
 
-## Core model: `App` and `Server`
+## Core model: `App` and mode servers
 
 - **`App`** — application infrastructure and client: lifecycle (`init/close`), hooks, middleware, exception handlers, serializers, and client operations (`call`, `send`, `emit`).
-- **`Server`** — a server scope bound to an `App` and a queue/group. It owns handler registration and consuming: `@server.method(...)`, `@server.task(...)`, `@server.subscribe(...)`, and `server.consume(...)` / `server.stop_consume(...)`.
+- **Mode servers** — servers bound to an `App` and a queue scope. Each mode has its own server type and API:
+  - `rpc = app.rpc(path=None, *, options=None)` → `RPC`: `@rpc.method(...)`, `rpc.consume()`, `rpc.stop_consume()`
+  - `worker = app.worker(path=None, *, options=None)` → `Worker`: `@worker.task(...)`, `worker.consume()`, `worker.stop_consume()`
+  - `bus = app.bus(path=None, *, options=None)` → `Bus`: `@bus.subscribe(...)`, `bus.consume()`, `bus.stop_consume()`
 
-Create servers from an app:
-
-```python
-app = App("app", backend=...)
-
-root = app.server()                 # root scope, base queue "app"
-group = app.server("group")         # named scope, base queue "app.group"
-```
-
-`app.server(path, rpc_options=..., task_options=..., event_options=...)` configures backend-specific queue options for that server (per mode). Repeated calls for the same `path` return the same server when options match.
+`path=None` (root) uses base queue `app.name`; `path="group"` uses base queue `app.name.group`. `options` configures backend-specific queue options for that server (`QueueOptions`, a sequence, or `None`). Repeated calls for the same mode/path return the same server when options match.
 
 ## Delivery modes
 
-| Mode | Registration (on `Server`) | Client (`App`) | Behaviour |
+| Mode | Registration | Client (`App`) | Behaviour |
 |---|---|---|---|
-| RPC | `@server.method("foo")` | `await app.client.call("app.foo", (), {})` | One consumer handles the call and returns a result. |
-| Task | `@server.task("send")` | `await app.client.send("app.email.send", (), {"user_id": 1})` | One of the consumers handles the task. No result. |
-| Event | `@server.subscribe("user.created")` | `await app.client.emit("user.created", {"user_id": 1})` | Matching subscribers receive the event. No result. |
+| RPC | `@rpc.method("foo")` | `await app.client.call("app.foo", (), {})` | One consumer handles the call and returns a result. |
+| Task | `@worker.task("send")` | `await app.client.send("app.email.send", (), {"user_id": 1})` | One of the consumers handles the task. No result. |
+| Event | `@bus.subscribe("user.created")` | `await app.client.emit("user.created", {"user_id": 1})` | Matching subscribers receive the event. No result. |
 
 Client methods take positional arguments as a tuple and keyword arguments as a dict:
 
@@ -41,23 +35,33 @@ await app.client.send("app.email.send", (), {"user_id": 1})
 await app.client.emit("user.created", {"user_id": 1})
 ```
 
+## Health checks
+
+`App` and backends expose `healthcheck() -> HealthStatus(ready, health)`:
+
+- `ready=False, health=None` — app/backend is not ready (not initialized, closed, or probe failed).
+- `ready=True, health=...` — backend is ready and `health` reflects dependency/consumer health (backend-specific).
+
+`App.healthcheck()` normalizes backend failures to `HealthStatus(ready=False, health=None)` and never returns the backend's `HealthStatus` instance.  
+`LocalBackend` reports healthy when ready; `RmqBackend` checks live AMQP connection/channel and broker-visible consumers for active queues (in parallel).
+
 ## Handlers, local names, and addressing
 
 Handler names in decorators are **local to the server** (leaf names, without `.`). The server scope defines the queue:
 
-- `root = app.server()` → base queue `app`
-  - `@root.method("method")` registers RPC leaf `method` on queue `app` (fully qualified: `app.method`)
-- `group = app.server("group")` → base queue `app.group`
-  - `@group.method("method")` registers RPC leaf `method` on queue `app.group` (fully qualified: `app.group.method`)
+- `rpc = app.rpc()` → base queue `app`
+  - `@rpc.method("method")` registers RPC leaf `method` on queue `app` (fully qualified: `app.method`)
+- `rpc = app.rpc("group")` → base queue `app.group`
+  - `@rpc.method("method")` registers RPC leaf `method` on queue `app.group` (fully qualified: `app.group.method`)
 
 Calls use the queue-qualified path:
 
 ```python
-await app.client.call("app.method", (), {})        # root server
-await app.client.call("app.group.method", (), {})  # group server
+await app.client.call("app.method", (), {})        # root RPC server
+await app.client.call("app.group.method", (), {})  # group RPC server
 ```
 
-The last segment is the handler/method leaf; everything before it resolves to the target queue (same queue-qualified convention for `send`).
+The last segment is the handler leaf; everything before it resolves to the target queue (same queue-qualified convention for `send`).
 
 ## Example
 
@@ -70,38 +74,42 @@ from linkr import App, LocalBackend
 async def main() -> None:
     app = App("app", backend=LocalBackend())
 
-    root = app.server()
+    root_rpc = app.rpc()
+    root_worker = app.worker()
 
-    @root.method("method")
+    @root_rpc.method("method")
     def method() -> str:
         return "root"
 
-    @root.task("task")
+    @root_worker.task("task")
     async def task() -> None:
         ...
 
-    group = app.server("group")
+    group_rpc = app.rpc("group")
+    group_worker = app.worker("group")
 
-    @group.method("method")  # local name "method", not "group.method"
+    @group_rpc.method("method")  # local name "method", not "group.method"
     def group_method() -> str:
         return "group"
 
-    @group.task("task")
+    @group_worker.task("task")
     async def group_task() -> None:
         ...
 
     await app.init()
 
-    await root.consume()
-    await group.consume()                 # or consume(mode="rpc"/"task"/"event")
+    await root_rpc.consume()
+    await root_worker.consume()
+    await group_rpc.consume()
+    await group_worker.consume()
 
     print(await app.client.call("app.method", (), {}))        # root server
     print(await app.client.call("app.group.method", (), {}))  # group server
 
-    await root.stop_consume()
-    await group.stop_consume(mode="rpc")
-    await group.stop_consume(mode="task")
-    await group.stop_consume(mode="event")
+    await root_rpc.stop_consume()
+    await root_worker.stop_consume()
+    await group_rpc.stop_consume()
+    await group_worker.stop_consume()
 
     await app.close()
 
@@ -111,21 +119,21 @@ asyncio.run(main())
 
 ## RPC
 
-Each server consumes its RPC queue and dispatches by leaf method name within that queue. Multiple RPC methods registered on the same server share that server's queue.
+Each `RPC` server consumes its queue and dispatches by leaf method name within that queue. Multiple RPC methods registered on the same server share that server's queue.
 
 ```python
 async with App("orders", backend=LocalBackend()) as app:
-    root = app.server()
+    rpc = app.rpc()
 
-    @root.method("foo")
+    @rpc.method("foo")
     def foo() -> str:
         return "foo"
 
-    @root.method("bar")
+    @rpc.method("bar")
     def bar() -> str:
         return "bar"
 
-    await root.consume(mode="rpc")
+    await rpc.consume()
     print(await app.client.call("orders.foo", (), {}))
     print(await app.client.call("orders.bar", (), {}))
 ```
@@ -134,8 +142,8 @@ Use separate servers for separate queues/groups:
 
 ```python
 app = App("orders", backend=LocalBackend())
-sa = app.server("serviceA")
-sb = app.server("serviceB")
+sa = app.rpc("serviceA")
+sb = app.rpc("serviceB")
 
 @sa.method("foo")
 def foo() -> str:
@@ -146,8 +154,8 @@ def bar() -> str:
     return "bar"
 
 await app.init()
-await sa.consume(mode="rpc")
-await sb.consume(mode="rpc")
+await sa.consume()
+await sb.consume()
 await app.client.call("orders.serviceA.foo", (), {})
 await app.client.call("orders.serviceB.bar", (), {})
 ```
@@ -158,29 +166,29 @@ A task has no response. Multiple consumers may listen on the same task queue; ea
 
 ```python
 async with App("worker", backend=LocalBackend()) as app:
-    email = app.server("email")
+    worker = app.worker("email")
 
-    @email.task("send")
+    @worker.task("send")
     async def send_email(user_id: int) -> None:
         ...
 
-    await email.consume(mode="task")
+    await worker.consume()
     await app.client.send("worker.email.send", (), {"user_id": 1})
 ```
 
 ## Events
 
-Events are published by topic (`app.client.emit`) and delivered to subscribers whose patterns match. **Each server has its own event queue** and consumes only the subscriptions registered on that server.
+Events are published by topic (`app.client.emit`) and delivered to subscribers whose patterns match. **Each `Bus` server has its own event queue** and consumes only the subscriptions registered on that server.
 
 ```python
 async with App("billing", backend=LocalBackend()) as app:
-    root = app.server()
+    bus = app.bus()
 
-    @root.subscribe("user.created")
+    @bus.subscribe("user.created")
     def on_user_created(user_id: int) -> None:
         ...
 
-    await root.consume(mode="event")
+    await bus.consume()
     await app.client.emit("user.created", {"user_id": 1})
 ```
 
@@ -189,49 +197,49 @@ Wildcards are supported:
 - `*` matches exactly one segment: `user.*` matches `user.created`.
 - `#` matches zero or more segments: `user.#` matches `user.created` and `user.profile.updated`.
 
-Multiple subscribers in the same server for the same topic are all called. Different servers (each with its own event queue) that subscribe to a matching topic will each receive the event.
+Multiple subscribers in the same bus for the same topic are all called. Different bus servers (each with its own event queue) that subscribe to a matching topic will each receive the event.
 
 ## Lifecycle and consuming
 
 ```python
-server = app.server()
+rpc = app.rpc()
+worker = app.worker("email")
+bus = app.bus()
 
 await app.init()
-await server.consume()                # rpc + task + event (for this server)
-await server.consume(mode="rpc")      # only RPC
-await server.consume(mode="task")     # only task
-await server.consume(mode="event")    # only event
+await rpc.consume()
+await worker.consume()
+await bus.consume()
 
-await server.stop_consume()           # stop all modes for this server
-await server.stop_consume(mode="rpc")
-await server.stop_consume(mode="task")
-await server.stop_consume(mode="event")
+await rpc.stop_consume()     # pause/resume per server
+await worker.stop_consume()
+await bus.stop_consume()
 
 await app.close()
 ```
 
 - `App.init()` initializes the backend and middleware. `App.close()` stops all servers, closes middleware and backend.
-- `server.consume(...)` starts consuming for the given mode(s) on this server (idempotent for already-consuming modes/queues).
-- `server.stop_consume(...)` stops consuming for the given mode(s) on this server (pause). Handler registrations and subscriptions remain, so consuming can be started again with `server.consume(...)`.
-- There are no global `app.consume()` / `app.stop_consume()` methods; manage consuming per server.
+- `server.consume()` starts consuming for that server (idempotent when already consuming).
+- `server.stop_consume()` stops consuming for that server (pause). Handler registrations and subscriptions remain, so consuming can be started again.
+- There are no global `app.consume()` / `app.stop_consume()` methods and no mode argument; manage consuming per mode server.
 
 ## Queue options
 
-Backend-specific queue options are configured per server and mode when creating the server:
+Backend-specific queue options are configured per server when creating it:
 
 ```python
 from linkr.backends.rmq import RmqQueueOptions  # backend-specific
 
-rpc = app.server("serviceA", rpc_options=[RmqQueueOptions(prefetch_count=5, durable=True)])
-email = app.server("email", task_options=[RmqQueueOptions(prefetch_count=50)])
-root = app.server(event_options=[RmqQueueOptions(prefetch_count=10)])
+rpc = app.rpc("serviceA", options=[RmqQueueOptions(prefetch_count=5, durable=True)])
+email = app.worker("email", options=[RmqQueueOptions(prefetch_count=50)])
+bus = app.bus(options=[RmqQueueOptions(prefetch_count=10)])
 
 @rpc.method("ping")
 def ping() -> str:
     return "pong"
 
 await app.init()
-await rpc.consume(mode="rpc")
+await rpc.consume()
 ```
 
 Options are opaque to `App`; the active backend selects the types it understands. `LocalBackend` ignores transport options.
