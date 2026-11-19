@@ -550,7 +550,7 @@ class RmqBackend(Backend):
             consumer_tag: str | None = None
             try:
                 rmq_queue = await channel.declare_queue(queue_name, **declare_kwargs)
-                await rmq_queue.bind(exchange, routing_key=queue)
+                await rmq_queue.bind(exchange, routing_key=queue_name)
 
                 async def _rpc_handler(incoming: AbstractIncomingMessage) -> None:
                     await self._on_rpc_message(incoming, handler)
@@ -637,7 +637,8 @@ class RmqBackend(Backend):
                 correlation_id=correlation_id,
                 reply_to=self._callback_queue.name,
             )
-            await self._exchanges["rpc"].publish(robust_message, routing_key=queue)
+            routing_key = self.queue_name_to_rmq_queue_name(queue, "rpc")
+            await self._exchanges["rpc"].publish(robust_message, routing_key=routing_key)
         except Exception:
             self._futures.pop(correlation_id, None)
             if not future.done():
@@ -704,7 +705,7 @@ class RmqBackend(Backend):
             consumer_tag: str | None = None
             try:
                 rmq_queue = await channel.declare_queue(queue_name, **declare_kwargs)
-                await rmq_queue.bind(exchange, routing_key=queue)
+                await rmq_queue.bind(exchange, routing_key=queue_name)
 
                 async def _task_handler(incoming: AbstractIncomingMessage) -> None:
                     await self._on_task_message(incoming, handler)
@@ -755,7 +756,8 @@ class RmqBackend(Backend):
             raise RuntimeError("backend not initialized")
 
         robust_message = self._to_robust_message(message)
-        await self._exchanges["task"].publish(robust_message, routing_key=queue)
+        routing_key = self.queue_name_to_rmq_queue_name(queue, "task")
+        await self._exchanges["task"].publish(robust_message, routing_key=routing_key)
 
     # ------------------------------------------------------------------
     # Event

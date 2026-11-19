@@ -99,12 +99,12 @@ class TestRmqBackend:
         task_msg, task_rk, _ = exchanges["task"].published[0]
         event_msg, event_rk, _ = exchanges["event"].published[0]
 
-        assert rpc_rk == "svc.queue"
+        assert rpc_rk == "linkr.rpc.svc.queue"
         assert rpc_msg.expiration == timedelta(seconds=5)
         assert rpc_msg.reply_to == callback.name
         assert rpc_msg.correlation_id is not None
 
-        assert task_rk == "svc.tasks"
+        assert task_rk == "linkr.tasks.svc.tasks"
         assert task_msg.expiration == timedelta(seconds=7)
 
         assert event_rk == "topic.a"
@@ -170,7 +170,7 @@ class TestRmqBackend:
         task_msg = exchanges["task"].published[0][0]
         event_msg = exchanges["event"].published[0][0]
 
-        assert rpc_rk == "svc.queue"
+        assert rpc_rk == "linkr.rpc.svc.queue"
         assert rpc_msg.reply_to == callback.name
         assert rpc_msg.content_type == "application/x-msgpack"
         assert rpc_msg.content_encoding == "gzip"

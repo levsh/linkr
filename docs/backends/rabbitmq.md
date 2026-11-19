@@ -57,8 +57,8 @@ await rpc.consume()
 ## Queue topology
 
 - Logical queues come from server scopes and event queues (e.g. `app`, `app.group`, `app.<instance_id>` or `app.group.<instance_id>` for events).
-- Physical broker queues are namespaced: `linkr.rpc.<queue>`, `linkr.tasks.<queue>`, `linkr.events.<queue>`.
-- Bind/publish routing keys use the logical queue/topic names as expected by linkr.
+- Physical broker queues are namespaced by mode via `queue_name_template` (default: `linkr.rpc.<queue>`, `linkr.tasks.<queue>`, `linkr.events.<queue>`).
+- Bind/publish routing keys: RPC and tasks use the physical (mode-specific) queue name for both binding and publishing; events use the topic pattern/name as the routing key.
 - RPC replies are delivered to a per-backend-instance exclusive callback queue (`<results_queue_prefix><id>`), used as `reply_to` with `correlation_id` matching.
 
 ## Consuming and stopping
