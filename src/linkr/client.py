@@ -259,6 +259,9 @@ class Client:
         ser = self._get_serializer(serializer)
         request_message = ser.dumps_request(request)
         request_message.headers["serializer"] = ser.name
+        ttl = request.headers.get("ttl")
+        if ttl is not None:
+            request_message.headers["ttl"] = ttl
         if context is None:
             context = {}
 
@@ -379,6 +382,9 @@ class Client:
         ser = self._get_serializer(serializer)
         request_message = ser.dumps_request(request)
         request_message.headers["serializer"] = ser.name
+        ttl = request.headers.get("ttl")
+        if ttl is not None:
+            request_message.headers["ttl"] = ttl
         if context is None:
             context = {}
 
@@ -451,6 +457,9 @@ class Client:
         ser = self._get_serializer(serializer)
         request_message = ser.dumps_request(request)
         request_message.headers["serializer"] = ser.name
+        ttl = request.headers.get("ttl")
+        if ttl is not None:
+            request_message.headers["ttl"] = ttl
         if context is None:
             context = {}
 
