@@ -13,7 +13,7 @@ from uuid import UUID
 from pydantic import TypeAdapter, ValidationError
 
 from .di import Depends
-from .exceptions import ErrorCode, RequestError, RPCError
+from .exceptions import ErrorCode, RegistrationAlreadyExistsError, RegistrationNotFoundError, RequestError, RPCError
 from .hooks import (
     AfterHandlerEvent,
     BeforeHandlerEvent,
@@ -438,7 +438,12 @@ class RPC(_Server):
         leaf = self._validate_leaf_name(name)
         key = (self._queue_base, leaf)
         if key not in self._handlers:
-            raise KeyError(f"rpc handler not registered: {leaf!r}")
+            raise RegistrationNotFoundError(
+                f"rpc handler not registered: {leaf!r}",
+                kind="method",
+                name=leaf,
+                queue=self._queue_base,
+            )
         self._handlers.pop(key)
 
     def _register(self, leaf: str, options: dict[str, Any]) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
@@ -458,17 +463,27 @@ class RPC(_Server):
         key = (queue, leaf)
 
         self._validate_handler(fn)
-        if key in self._handlers:
-            raise ValueError(f"rpc handler already registered for {queue!r}: {leaf!r}")
+        existing = self._handlers.get(key)
+        if existing is not None:
+            existing_fn = existing.fn
+            existing_orig = getattr(existing_fn, "__wrapped__", existing_fn)
+            incoming_orig = getattr(fn, "__wrapped__", fn)
+            same_handler = existing_fn is fn or existing_orig is fn or existing_orig is incoming_orig
+            if same_handler and existing.options == options:
+                return existing_fn
+            raise RegistrationAlreadyExistsError(
+                f"rpc handler already registered for {queue!r}: {leaf!r}",
+                kind="method",
+                name=leaf,
+                queue=queue,
+            )
 
         @wraps(fn)
         def wrapper(*args: Any, **kwds: Any) -> Any:
             return fn(*args, **kwds)
 
         dep_types = self._dep_types(fn)
-        validate_args, validation_adapters, validation_param_names = self._build_validation_plan(
-            fn, options, dep_types
-        )
+        validate_args, validation_adapters, validation_param_names = self._build_validation_plan(fn, options, dep_types)
         self._handlers[key] = HandlerInfo(
             name=fq_name,
             request_type="rpc",
@@ -806,7 +821,12 @@ class Worker(_Server):
         leaf = self._validate_leaf_name(name)
         key = (self._queue_base, leaf)
         if key not in self._handlers:
-            raise KeyError(f"task handler not registered: {leaf!r}")
+            raise RegistrationNotFoundError(
+                f"task handler not registered: {leaf!r}",
+                kind="task",
+                name=leaf,
+                queue=self._queue_base,
+            )
         self._handlers.pop(key)
 
     def _register(self, leaf: str, options: dict[str, Any]) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
@@ -826,17 +846,27 @@ class Worker(_Server):
         key = (queue, leaf)
 
         self._validate_handler(fn)
-        if key in self._handlers:
-            raise ValueError(f"task handler already registered for {queue!r}: {leaf!r}")
+        existing = self._handlers.get(key)
+        if existing is not None:
+            existing_fn = existing.fn
+            existing_orig = getattr(existing_fn, "__wrapped__", existing_fn)
+            incoming_orig = getattr(fn, "__wrapped__", fn)
+            same_handler = existing_fn is fn or existing_orig is fn or existing_orig is incoming_orig
+            if same_handler and existing.options == options:
+                return existing_fn
+            raise RegistrationAlreadyExistsError(
+                f"task handler already registered for {queue!r}: {leaf!r}",
+                kind="task",
+                name=leaf,
+                queue=queue,
+            )
 
         @wraps(fn)
         def wrapper(*args: Any, **kwds: Any) -> Any:
             return fn(*args, **kwds)
 
         dep_types = self._dep_types(fn)
-        validate_args, validation_adapters, validation_param_names = self._build_validation_plan(
-            fn, options, dep_types
-        )
+        validate_args, validation_adapters, validation_param_names = self._build_validation_plan(fn, options, dep_types)
         self._handlers[key] = HandlerInfo(
             name=fq_name,
             request_type="task",
@@ -1083,11 +1113,32 @@ class Bus(_Server):
         self._subscribers_by_topic.setdefault(topic, []).append(info)
         self._subscription_patterns.add(topic)
 
+    def _find_subscriber(self, topic: str, handler: Callable[..., Any]) -> HandlerInfo | None:
+        subscribers = self._subscribers_by_topic.get(topic, [])
+        for info in subscribers:
+            fn = info.fn
+            wrapped_fn = getattr(fn, "__wrapped__", None)
+            wrapped_handler = getattr(handler, "__wrapped__", None)
+            if fn is handler or wrapped_fn is handler or fn is wrapped_handler:
+                return info
+        return None
+
     def subscribe(self, topic: str, **options: Any) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         if self._consuming:
             raise RuntimeError("cannot subscribe while consuming; use add_subscriber()")
 
         def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+            self._validate_handler(fn)
+            existing = self._find_subscriber(topic, fn)
+            if existing is not None:
+                if existing.options == options:
+                    return existing.fn
+                raise RegistrationAlreadyExistsError(
+                    f"event subscriber already registered for topic: {topic!r}",
+                    kind="subscriber",
+                    name=topic,
+                    queue=self._queue_base,
+                )
             info = self._create_subscriber_info(topic, fn, options)
             self._register_subscriber_info(topic, info)
             return info.fn
@@ -1102,8 +1153,20 @@ class Bus(_Server):
     ) -> Callable[..., Any]:
         if self._app.is_closed:
             raise RuntimeError("App is closed")
-        info = self._create_subscriber_info(topic, handler, options)
+        self._validate_handler(handler)
         async with self._subscription_lock:
+            existing = self._find_subscriber(topic, handler)
+            if existing is not None:
+                if existing.options == options:
+                    return existing.fn
+                raise RegistrationAlreadyExistsError(
+                    f"event subscriber already registered for topic: {topic!r}",
+                    kind="subscriber",
+                    name=topic,
+                    queue=self._queue_base,
+                )
+
+            info = self._create_subscriber_info(topic, handler, options)
             is_new_pattern = topic not in self._subscription_patterns
             event_queue = self._event_queue
             needs_bind = self._consuming and event_queue is not None and topic not in self._bound_patterns
@@ -1128,7 +1191,12 @@ class Bus(_Server):
         async with self._subscription_lock:
             subscribers = self._subscribers_by_topic.get(topic)
             if not subscribers:
-                raise KeyError(f"event subscriber not registered for topic: {topic!r}")
+                raise RegistrationNotFoundError(
+                    f"event subscriber not registered for topic: {topic!r}",
+                    kind="subscriber",
+                    name=topic,
+                    queue=self._queue_base,
+                )
 
             if handler is None:
                 subscribers.clear()
@@ -1142,7 +1210,12 @@ class Bus(_Server):
                         index = i
                         break
                 if index is None:
-                    raise KeyError(f"event subscriber handler not registered for topic: {topic!r}")
+                    raise RegistrationNotFoundError(
+                        f"event subscriber handler not registered for topic: {topic!r}",
+                        kind="subscriber",
+                        name=topic,
+                        queue=self._queue_base,
+                    )
                 subscribers.pop(index)
 
             if subscribers:

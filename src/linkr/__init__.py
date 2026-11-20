@@ -5,7 +5,14 @@ from linkr.backends import Backend, Mode
 from linkr.backends.local import LocalBackend
 from linkr.client import Client
 from linkr.di import Depends
-from linkr.exceptions import ErrorCode, LinkrError, RequestError, RPCError
+from linkr.exceptions import (
+    ErrorCode,
+    LinkrError,
+    RegistrationAlreadyExistsError,
+    RegistrationNotFoundError,
+    RequestError,
+    RPCError,
+)
 from linkr.hooks import (
     AfterHandlerEvent,
     AppHooks,
@@ -49,6 +56,8 @@ __all__ = [
     "LocalBackend",
     "Mode",
     "RPC",
+    "RegistrationAlreadyExistsError",
+    "RegistrationNotFoundError",
     "Request",
     "RequestError",
     "RequestType",

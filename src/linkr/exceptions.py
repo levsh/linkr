@@ -24,6 +24,54 @@ class LinkrError(Exception):
     """
 
 
+class RegistrationNotFoundError(LinkrError, LookupError):
+    """Raised when a method, task, or subscriber to remove is not registered."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        kind: str,
+        name: str,
+        queue: str | None = None,
+    ) -> None:
+        """
+        Args:
+            message: Human-readable error description.
+            kind: Registration kind (e.g. ``"method"``, ``"task"``, ``"subscriber"``).
+            name: Registration name/topic.
+            queue: Logical queue or queue base, when applicable.
+        """
+        super().__init__(message)
+        self.kind = kind
+        self.name = name
+        self.queue = queue
+
+
+class RegistrationAlreadyExistsError(LinkrError):
+    """Raised when a method/task cannot be registered due to a conflicting registration."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        kind: str,
+        name: str,
+        queue: str | None = None,
+    ) -> None:
+        """
+        Args:
+            message: Human-readable error description.
+            kind: Registration kind (e.g. ``"method"``, ``"task"``).
+            name: Registration name.
+            queue: Logical queue or queue base, when applicable.
+        """
+        super().__init__(message)
+        self.kind = kind
+        self.name = name
+        self.queue = queue
+
+
 class RPCError(LinkrError):
     """
     Error resulting from an RPC call.

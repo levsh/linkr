@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from linkr import App, LocalBackend
+from linkr import App, LocalBackend, RegistrationAlreadyExistsError, RegistrationNotFoundError
 from tests.helpers import call, emit, send
 
 
@@ -51,16 +51,40 @@ class TestDynamicRpcRegistration:
             await call(app, "app.ping")
 
     async def test_remove_method_not_found(self, app: App, rpc):
-        with pytest.raises(KeyError):
+        with pytest.raises(RegistrationNotFoundError) as exc_info:
             await rpc.remove_method("missing")
+        assert exc_info.value.kind == "method"
+        assert exc_info.value.name == "missing"
 
-    async def test_add_method_duplicate_raises(self, app: App, rpc):
+    async def test_add_method_duplicate_same_handler_and_options_idempotent(self, app: App, rpc):
         @rpc.method("ping")
         def ping() -> str:
             return "pong"
 
-        with pytest.raises(ValueError, match="already registered"):
+        same = await rpc.add_method("ping", ping)
+        assert same is rpc.methods["ping"].fn
+        again = await rpc.add_method("ping", same)
+        assert again is same
+        await rpc.consume()
+        assert await call(app, "app.ping") == "pong"
+
+    async def test_add_method_duplicate_conflict_raises(self, app: App, rpc):
+        @rpc.method("ping")
+        def ping() -> str:
+            return "pong"
+
+        with pytest.raises(RegistrationAlreadyExistsError) as exc_info:
             await rpc.add_method("ping", lambda: "dup")
+        assert exc_info.value.kind == "method"
+        assert exc_info.value.name == "ping"
+
+    async def test_add_method_duplicate_same_handler_different_options_raises(self, app: App, rpc):
+        @rpc.method("ping", validate_types=True)
+        def ping(x: int) -> int:
+            return x
+
+        with pytest.raises(RegistrationAlreadyExistsError):
+            await rpc.add_method("ping", ping)
 
 
 class TestDynamicTaskRegistration:
@@ -100,8 +124,34 @@ class TestDynamicTaskRegistration:
         assert seen == ["a"]
 
     async def test_remove_task_not_found(self, app: App, worker):
-        with pytest.raises(KeyError):
+        with pytest.raises(RegistrationNotFoundError) as exc_info:
             await worker.remove_task("missing")
+        assert exc_info.value.kind == "task"
+        assert exc_info.value.name == "missing"
+
+    async def test_add_task_duplicate_same_handler_and_options_idempotent(self, app: App, worker):
+        seen: list[str] = []
+
+        @worker.task("job")
+        def job(value: str) -> None:
+            seen.append(value)
+
+        same = await worker.add_task("job", job)
+        assert same is worker.tasks["job"].fn
+        again = await worker.add_task("job", same)
+        assert again is same
+        await worker.consume()
+        await send(app, "app.job", "x")
+        assert seen == ["x"]
+
+    async def test_add_task_duplicate_conflict_raises(self, app: App, worker):
+        @worker.task("job")
+        def job() -> None:
+            return None
+
+        with pytest.raises(RegistrationAlreadyExistsError) as exc_info:
+            await worker.add_task("job", lambda: None)
+        assert exc_info.value.kind == "task"
 
 
 class TestDynamicBusRegistration:
@@ -259,8 +309,36 @@ class TestDynamicBusRegistration:
         assert seen == ["ok"]
 
     async def test_remove_subscriber_not_found(self, app: App, bus):
-        with pytest.raises(KeyError):
+        with pytest.raises(RegistrationNotFoundError) as exc_info:
             await bus.remove_subscriber("missing")
+        assert exc_info.value.kind == "subscriber"
+        assert exc_info.value.name == "missing"
+
+    async def test_add_subscriber_duplicate_same_handler_and_options_idempotent(self, app: App, bus):
+        seen: list[int] = []
+
+        @bus.subscribe("user.created")
+        def on_user(user_id: int) -> None:
+            seen.append(user_id)
+
+        same = await bus.add_subscriber("user.created", on_user)
+        existing = bus.subscriptions["user.created"][0].fn
+        assert same is existing
+        again = await bus.add_subscriber("user.created", same)
+        assert again is same
+        await bus.consume()
+        await emit(app, "user.created", user_id=1)
+        assert seen == [1]
+
+    async def test_add_subscriber_duplicate_same_handler_different_options_raises(self, app: App, bus):
+        @bus.subscribe("user.created", validate_types=True)
+        def on_user(user_id: int) -> None:
+            return None
+
+        with pytest.raises(RegistrationAlreadyExistsError) as exc_info:
+            await bus.add_subscriber("user.created", on_user)
+        assert exc_info.value.kind == "subscriber"
+        assert exc_info.value.name == "user.created"
 
     async def test_add_subscriber_new_pattern_unsupported_backend(self):
         class NoBindBackend(LocalBackend):
