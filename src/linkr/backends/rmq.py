@@ -816,6 +816,19 @@ class RmqBackend(Backend):
                         logger.exception("Failed to close dedicated event channel for queue %s", queue)
                 raise
 
+    async def bind_event_topics(self, queue: str, topics: Sequence[str]) -> None:
+        """Bind topic patterns to an active event consumer queue (idempotent)."""
+        async with self._op_lock:
+            if self._closed or not self._initialized or self._exchanges.get("event") is None:
+                raise RuntimeError("backend not initialized")
+            consumer = self._consumers.get("event", {}).get(queue)
+            if consumer is None:
+                raise RuntimeError(f"event consumer not active for queue: {queue}")
+            channel, rmq_queue, _ = consumer
+            exchange = await self._get_exchange(channel, "event")
+            for topic in topics:
+                await rmq_queue.bind(exchange, routing_key=topic)
+
     async def _on_event_message(
         self,
         incoming: AbstractIncomingMessage,

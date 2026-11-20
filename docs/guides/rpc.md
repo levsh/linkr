@@ -30,7 +30,9 @@ def add(x: int, y: int) -> int:
 # FQ: orders.math.add, queue: orders.math
 ```
 
-- `@rpc.method(name, **options)` registers an RPC handler with a local leaf name on the server's queue.
+- `@rpc.method(name, **options)` registers an RPC handler with a local leaf name on the server's queue. It must be used while the server is not consuming.
+- `await rpc.add_method(name, handler, **options)` registers a handler at runtime (idle or while consuming). The handler becomes effective for subsequent requests without `stop_consume()`/`consume()`.
+- `await rpc.remove_method(name)` removes a handler (idle or while consuming). Subsequent requests resolve as method-not-found.
 - Supported handler options (see [Configuration](../reference/configuration.md)): e.g. `validate_types`.
 - Sync and async handler functions are supported.
 
@@ -70,4 +72,4 @@ await rpc.consume()       # start consuming for this RPC server
 await rpc.stop_consume()  # pause this RPC server (resumable)
 ```
 
-Consuming is controlled per RPC server (no per-method stop, no global app consume/stop, no mode argument).
+Consuming is controlled per RPC server (no per-method stop, no global app consume/stop, no mode argument). Use `add_method()` / `remove_method()` to change handlers while consuming.

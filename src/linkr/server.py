@@ -418,42 +418,70 @@ class RPC(_Server):
         return {leaf: info for (_, leaf), info in self._handlers.items()}
 
     def method(self, name: str, **options: Any) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        if self._consuming:
+            raise RuntimeError("cannot register method while consuming; use add_method()")
         leaf = self._validate_leaf_name(name)
         return self._register(leaf, options)
 
+    async def add_method(
+        self,
+        name: str,
+        handler: Callable[..., Any],
+        **options: Any,
+    ) -> Callable[..., Any]:
+        if self._app.is_closed:
+            raise RuntimeError("App is closed")
+        leaf = self._validate_leaf_name(name)
+        return self._register_handler(leaf, handler, options)
+
+    async def remove_method(self, name: str) -> None:
+        leaf = self._validate_leaf_name(name)
+        key = (self._queue_base, leaf)
+        if key not in self._handlers:
+            raise KeyError(f"rpc handler not registered: {leaf!r}")
+        self._handlers.pop(key)
+
     def _register(self, leaf: str, options: dict[str, Any]) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+            return self._register_handler(leaf, fn, options)
+
+        return decorator
+
+    def _register_handler(
+        self,
+        leaf: str,
+        fn: Callable[..., Any],
+        options: dict[str, Any],
+    ) -> Callable[..., Any]:
         queue = self._queue_base
         fq_name = f"{queue}.{leaf}"
         key = (queue, leaf)
 
-        def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
-            self._validate_handler(fn)
-            if key in self._handlers:
-                raise ValueError(f"rpc handler already registered for {queue!r}: {leaf!r}")
+        self._validate_handler(fn)
+        if key in self._handlers:
+            raise ValueError(f"rpc handler already registered for {queue!r}: {leaf!r}")
 
-            @wraps(fn)
-            def wrapper(*args: Any, **kwds: Any) -> Any:
-                return fn(*args, **kwds)
+        @wraps(fn)
+        def wrapper(*args: Any, **kwds: Any) -> Any:
+            return fn(*args, **kwds)
 
-            dep_types = self._dep_types(fn)
-            validate_args, validation_adapters, validation_param_names = self._build_validation_plan(
-                fn, options, dep_types
-            )
-            self._handlers[key] = HandlerInfo(
-                name=fq_name,
-                request_type="rpc",
-                fn=wrapper,
-                signature=str(inspect.signature(fn)),
-                options=options,
-                dep_types=dep_types,
-                queue=queue,
-                validate_args=validate_args,
-                validation_adapters=validation_adapters,
-                validation_param_names=validation_param_names,
-            )
-            return wrapper
-
-        return decorator
+        dep_types = self._dep_types(fn)
+        validate_args, validation_adapters, validation_param_names = self._build_validation_plan(
+            fn, options, dep_types
+        )
+        self._handlers[key] = HandlerInfo(
+            name=fq_name,
+            request_type="rpc",
+            fn=wrapper,
+            signature=str(inspect.signature(fn)),
+            options=options,
+            dep_types=dep_types,
+            queue=queue,
+            validate_args=validate_args,
+            validation_adapters=validation_adapters,
+            validation_param_names=validation_param_names,
+        )
+        return wrapper
 
     async def consume(self) -> None:
         if self._consuming:
@@ -758,42 +786,70 @@ class Worker(_Server):
         return {leaf: info for (_, leaf), info in self._handlers.items()}
 
     def task(self, name: str, **options: Any) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        if self._consuming:
+            raise RuntimeError("cannot register task while consuming; use add_task()")
         leaf = self._validate_leaf_name(name)
         return self._register(leaf, options)
 
+    async def add_task(
+        self,
+        name: str,
+        handler: Callable[..., Any],
+        **options: Any,
+    ) -> Callable[..., Any]:
+        if self._app.is_closed:
+            raise RuntimeError("App is closed")
+        leaf = self._validate_leaf_name(name)
+        return self._register_handler(leaf, handler, options)
+
+    async def remove_task(self, name: str) -> None:
+        leaf = self._validate_leaf_name(name)
+        key = (self._queue_base, leaf)
+        if key not in self._handlers:
+            raise KeyError(f"task handler not registered: {leaf!r}")
+        self._handlers.pop(key)
+
     def _register(self, leaf: str, options: dict[str, Any]) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+            return self._register_handler(leaf, fn, options)
+
+        return decorator
+
+    def _register_handler(
+        self,
+        leaf: str,
+        fn: Callable[..., Any],
+        options: dict[str, Any],
+    ) -> Callable[..., Any]:
         queue = self._queue_base
         fq_name = f"{queue}.{leaf}"
         key = (queue, leaf)
 
-        def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
-            self._validate_handler(fn)
-            if key in self._handlers:
-                raise ValueError(f"task handler already registered for {queue!r}: {leaf!r}")
+        self._validate_handler(fn)
+        if key in self._handlers:
+            raise ValueError(f"task handler already registered for {queue!r}: {leaf!r}")
 
-            @wraps(fn)
-            def wrapper(*args: Any, **kwds: Any) -> Any:
-                return fn(*args, **kwds)
+        @wraps(fn)
+        def wrapper(*args: Any, **kwds: Any) -> Any:
+            return fn(*args, **kwds)
 
-            dep_types = self._dep_types(fn)
-            validate_args, validation_adapters, validation_param_names = self._build_validation_plan(
-                fn, options, dep_types
-            )
-            self._handlers[key] = HandlerInfo(
-                name=fq_name,
-                request_type="task",
-                fn=wrapper,
-                signature=str(inspect.signature(fn)),
-                options=options,
-                dep_types=dep_types,
-                queue=queue,
-                validate_args=validate_args,
-                validation_adapters=validation_adapters,
-                validation_param_names=validation_param_names,
-            )
-            return wrapper
-
-        return decorator
+        dep_types = self._dep_types(fn)
+        validate_args, validation_adapters, validation_param_names = self._build_validation_plan(
+            fn, options, dep_types
+        )
+        self._handlers[key] = HandlerInfo(
+            name=fq_name,
+            request_type="task",
+            fn=wrapper,
+            signature=str(inspect.signature(fn)),
+            options=options,
+            dep_types=dep_types,
+            queue=queue,
+            validate_args=validate_args,
+            validation_adapters=validation_adapters,
+            validation_param_names=validation_param_names,
+        )
+        return wrapper
 
     async def consume(self) -> None:
         if self._consuming:
@@ -977,6 +1033,8 @@ class Bus(_Server):
         self._subscription_patterns: set[str] = set()
         self._consuming = False
         self._event_queue: str | None = None
+        self._bound_patterns: set[str] = set()
+        self._subscription_lock = asyncio.Lock()
 
     @property
     def event_queue(self) -> str | None:
@@ -993,38 +1051,122 @@ class Bus(_Server):
     def _event_queue_name(self) -> str:
         return f"{self._queue_base}.{self._app.instance_id}"
 
-    def subscribe(self, topic: str, **options: Any) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    def _create_subscriber_info(self, topic: str, fn: Callable[..., Any], options: dict[str, Any]) -> HandlerInfo:
+        self._validate_handler(fn)
+
+        @wraps(fn)
+        def wrapper(*args: Any, **kwds: Any) -> Any:
+            return fn(*args, **kwds)
+
+        dep_types = self._dep_types(fn)
+        validate_args, validation_adapters, validation_param_names = self._build_validation_plan(
+            fn,
+            options,
+            dep_types,
+        )
+        return HandlerInfo(
+            name=topic,
+            request_type="event",
+            fn=wrapper,
+            signature=str(inspect.signature(fn)),
+            options=options,
+            dep_types=dep_types,
+            queue=self._event_queue or self._event_queue_name(),
+            validate_args=validate_args,
+            validation_adapters=validation_adapters,
+            validation_param_names=validation_param_names,
+        )
+
+    def _register_subscriber_info(self, topic: str, info: HandlerInfo) -> None:
         if topic not in self._patterns_by_topic:
             self._patterns_by_topic[topic] = topic_to_regex(topic)
+        self._subscribers_by_topic.setdefault(topic, []).append(info)
+        self._subscription_patterns.add(topic)
+
+    def subscribe(self, topic: str, **options: Any) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        if self._consuming:
+            raise RuntimeError("cannot subscribe while consuming; use add_subscriber()")
 
         def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
-            self._validate_handler(fn)
-
-            @wraps(fn)
-            def wrapper(*args: Any, **kwds: Any) -> Any:
-                return fn(*args, **kwds)
-
-            dep_types = self._dep_types(fn)
-            validate_args, validation_adapters, validation_param_names = self._build_validation_plan(
-                fn, options, dep_types
-            )
-            info = HandlerInfo(
-                name=topic,
-                request_type="event",
-                fn=wrapper,
-                signature=str(inspect.signature(fn)),
-                options=options,
-                dep_types=dep_types,
-                queue=self._event_queue_name(),
-                validate_args=validate_args,
-                validation_adapters=validation_adapters,
-                validation_param_names=validation_param_names,
-            )
-            self._subscribers_by_topic.setdefault(topic, []).append(info)
-            self._subscription_patterns.add(topic)
-            return wrapper
+            info = self._create_subscriber_info(topic, fn, options)
+            self._register_subscriber_info(topic, info)
+            return info.fn
 
         return decorator
+
+    async def add_subscriber(
+        self,
+        topic: str,
+        handler: Callable[..., Any],
+        **options: Any,
+    ) -> Callable[..., Any]:
+        if self._app.is_closed:
+            raise RuntimeError("App is closed")
+        info = self._create_subscriber_info(topic, handler, options)
+        async with self._subscription_lock:
+            is_new_pattern = topic not in self._subscription_patterns
+            event_queue = self._event_queue
+            needs_bind = self._consuming and event_queue is not None and topic not in self._bound_patterns
+            if needs_bind and event_queue is not None:
+                try:
+                    await self._app.backend.bind_event_topics(event_queue, [topic])
+                except NotImplementedError as exc:
+                    raise RuntimeError(
+                        "backend does not support dynamic event binding; stop_consume() and consume() required"
+                    ) from exc
+            self._register_subscriber_info(topic, info)
+            if self._consuming and event_queue is not None and (needs_bind or not is_new_pattern):
+                self._bound_patterns.add(topic)
+        return info.fn
+
+    async def remove_subscriber(
+        self,
+        topic: str,
+        handler: Callable[..., Any] | None = None,
+    ) -> None:
+        unbound_queue: str | None = None
+        async with self._subscription_lock:
+            subscribers = self._subscribers_by_topic.get(topic)
+            if not subscribers:
+                raise KeyError(f"event subscriber not registered for topic: {topic!r}")
+
+            if handler is None:
+                subscribers.clear()
+            else:
+                index = None
+                for i, info in enumerate(subscribers):
+                    fn = info.fn
+                    wrapped_fn = getattr(fn, "__wrapped__", None)
+                    wrapped_handler = getattr(handler, "__wrapped__", None)
+                    if fn is handler or wrapped_fn is handler or fn is wrapped_handler:
+                        index = i
+                        break
+                if index is None:
+                    raise KeyError(f"event subscriber handler not registered for topic: {topic!r}")
+                subscribers.pop(index)
+
+            if subscribers:
+                return
+
+            self._subscribers_by_topic.pop(topic, None)
+            self._patterns_by_topic.pop(topic, None)
+            self._subscription_patterns.discard(topic)
+
+            if self._consuming and self._event_queue is not None and topic in self._bound_patterns:
+                unbound_queue = self._event_queue
+                await self._app.backend.stop_consume_events(self._event_queue, topic)
+            self._bound_patterns.discard(topic)
+
+        if unbound_queue is not None and self._app.hooks.on_consume_stop:
+            await self._app.hooks.on_consume_stop.emit(
+                ConsumeStopEvent(
+                    app=self._app.name,
+                    mode="event",
+                    queue=unbound_queue,
+                    topic=topic,
+                    reason="topic_unsubscribed",
+                )
+            )
 
     async def consume(self) -> None:
         if self._consuming:
@@ -1038,6 +1180,7 @@ class Bus(_Server):
         handler = self._make_handler(queue)
         await self._consume_backend("event", queue, handler, topics=list(topics), options=self._options)
         self._event_queue = queue
+        self._bound_patterns = set(topics)
         self._consuming = True
         if self._app.hooks.on_consume_start:
             await self._app.hooks.on_consume_start.emit(
@@ -1048,11 +1191,13 @@ class Bus(_Server):
         if not self._consuming or self._event_queue is None:
             self._consuming = False
             self._event_queue = None
+            self._bound_patterns.clear()
             return
         queue = self._event_queue
         await self._app.backend.stop_consume_events(queue)
         self._consuming = False
         self._event_queue = None
+        self._bound_patterns.clear()
         if self._app.hooks.on_consume_stop:
             await self._app.hooks.on_consume_stop.emit(
                 ConsumeStopEvent(app=self._app.name, mode="event", queue=queue, topic=None, reason="stopped")

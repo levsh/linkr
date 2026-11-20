@@ -68,6 +68,7 @@ Per-server consuming is managed by `server.consume()` / `server.stop_consume()` 
 - `consume_rpc(queue, handler, *, options=None)`
 - `consume_task(queue, handler, *, options=None)`
 - `consume_event(queue, topics, handler, *, options=None)`
+- `bind_event_topics(queue, topics)` — bind additional event topic patterns to an active event consumer (used for runtime `Bus.add_subscriber(...)` while consuming)
 - `stop_consume_rpc(queue=None)`
 - `stop_consume_tasks(queue=None)`
 - `stop_consume_events(queue=None, topic=None)`

@@ -15,7 +15,9 @@ async def send_email(user_id: int, template: str = "welcome") -> None:
     ...  # perform work
 ```
 
-- `@worker.task(name, **options)` registers a task handler with a local leaf name on the server's queue.
+- `@worker.task(name, **options)` registers a task handler with a local leaf name on the server's queue. It must be used while the server is not consuming.
+- `await worker.add_task(name, handler, **options)` registers a handler at runtime (idle or while consuming). The handler becomes effective for subsequent tasks without `stop_consume()`/`consume()`.
+- `await worker.remove_task(name)` removes a handler (idle or while consuming). Subsequent tasks for that name are treated as handler-not-found.
 - Supported handler options (see [Configuration](../reference/configuration.md)): e.g. `validate_types`.
 - Sync and async handlers are supported.
 
@@ -62,4 +64,4 @@ await worker.consume()       # start consuming for this worker
 await worker.stop_consume()  # pause this worker (resumable)
 ```
 
-Consuming is controlled per worker server (no global app consume/stop, no mode argument).
+Consuming is controlled per worker server (no global app consume/stop, no mode argument). Use `add_task()` / `remove_task()` to change handlers while consuming.

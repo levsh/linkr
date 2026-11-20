@@ -123,6 +123,19 @@ class Backend(ABC):
                 consumer. When ``None``, stop the targeted event consumer(s).
         """
 
+    async def bind_event_topics(self, queue: str, topics: Sequence[str]) -> None:
+        """Bind topic patterns to an active event consumer queue.
+
+        Idempotent operation for backends that support dynamic event bindings.
+        *queue* is the physical event queue name (same as in
+        ``consume_event``/``stop_consume_events``).
+
+        Raises:
+            NotImplementedError: Backend does not support dynamic binding.
+            RuntimeError: Event consumer for *queue* is not active.
+        """
+        raise NotImplementedError
+
     async def stop_consume(self, mode: Mode | None = None) -> None:
         """
         Deprecated compatibility shim. Use ``stop_consume_*`` methods.

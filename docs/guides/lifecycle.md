@@ -67,6 +67,8 @@ await worker.consume()
 - `server.consume()` starts consuming for that server.
 - Consuming is idempotent when already consuming.
 - Consuming on a closed app raises `RuntimeError`.
+- Declarative decorators `@rpc.method(...)`, `@worker.task(...)`, `@bus.subscribe(...)` must not be used while the server is consuming.
+- For runtime changes while consuming, use async APIs: `rpc.add_method()` / `rpc.remove_method()`, `worker.add_task()` / `worker.remove_task()`, `bus.add_subscriber()` / `bus.remove_subscriber()` (no `stop_consume()`/`consume()` cycle required). For Bus, adding a new topic pattern while consuming requires backend support for dynamic event binding.
 
 ## Stopping and resuming
 

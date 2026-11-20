@@ -20,6 +20,7 @@ You can also construct and pass it inline: `App("app", backend=LocalBackend())`.
 - **Tasks:** competing consumers per task queue — when multiple consumers are registered for the same queue, each task is delivered to exactly one consumer (round-robin).
 - **Events:** fan-out to all registered consumers whose topic patterns match; each bus instance has its own event queue/consumer.
 - **Stop semantics:** supports `stop_consume_rpc(queue=None)`, `stop_consume_tasks(queue=None)`, and `stop_consume_events(queue=None, topic=None)` for per-queue/topic control (used by server `stop_consume()`).
+- **Dynamic event bindings:** supports `bind_event_topics(queue, topics)` for adding Bus topic patterns while consuming.
 - **Healthcheck:** `healthcheck()` returns `HealthStatus(ready=False, health=None)` when the backend is not initialized or has been closed; otherwise `HealthStatus(ready=True, health=True)`.
 - **Reset:** `LocalBackend.reset()` clears global in-process registries (useful in tests).
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -131,6 +132,14 @@ class LocalBackend(Backend):
             patterns={topic: topic_to_regex(topic) for topic in topics},
             handler=handler,
         )
+
+    async def bind_event_topics(self, queue: str, topics: Sequence[str]) -> None:
+        """Bind topic patterns to an active event consumer queue (idempotent)."""
+        consumer = self._event_consumers.get(queue)
+        if consumer is None or consumer.backend is not self:
+            raise RuntimeError(f"event consumer not active for queue: {queue}")
+        for topic in topics:
+            consumer.patterns.setdefault(topic, topic_to_regex(topic))
 
     async def stop_consume_rpc(self, queue: str | None = None) -> None:
         """

@@ -19,7 +19,14 @@ def on_any_user_event(user_id: int) -> None:
     ...
 ```
 
-- `@bus.subscribe(topic_pattern, **options)` registers a subscriber on this bus.
+- `@bus.subscribe(topic_pattern, **options)` registers a subscriber on this bus. It must be used while the bus is not consuming.
+- `await bus.add_subscriber(topic_pattern, handler, **options)` registers a subscriber at runtime.
+  - If the bus is not consuming, it is applied on the next `consume()`.
+  - If the bus is consuming and the topic pattern is already bound, the subscriber becomes effective for subsequent matching events.
+  - If the bus is consuming and this is a new topic pattern, the backend binds it dynamically (no `stop_consume()`/`consume()`), when the backend supports dynamic event binding; events published before binding completes are not delivered.
+- `await bus.remove_subscriber(topic_pattern, handler=None)` removes a specific subscriber or the whole topic pattern.
+  - Removing the last handler of a pattern while consuming unbinds the topic from the active event queue (when bound).
+  - Idle changes affect the next `consume()`.
 - Each bus has its **own event queue**; subscriptions on a bus are consumed only by that bus.
 - Supported handler options (see [Configuration](../reference/configuration.md)): e.g. `validate_types`.
 - The event payload is passed to handlers as keyword arguments.
@@ -68,4 +75,4 @@ await bus.consume()       # start consuming for this bus
 await bus.stop_consume()  # pause this bus (resumable)
 ```
 
-Consuming is controlled per bus. Stopping event consuming on a bus pauses its subscriptions without removing them.
+Consuming is controlled per bus. Stopping event consuming on a bus pauses its subscriptions without removing them. While consuming, use `add_subscriber()` / `remove_subscriber()` for runtime changes.
