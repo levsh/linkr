@@ -3,6 +3,7 @@ import importlib.metadata
 from linkr.app import App
 from linkr.backends import Backend, Mode
 from linkr.backends.local import LocalBackend
+from linkr.client import Client
 from linkr.di import Depends
 from linkr.exceptions import ErrorCode, LinkrError, RequestError, RPCError
 from linkr.hooks import (
@@ -38,6 +39,7 @@ __all__ = [
     "App",
     "Backend",
     "Bus",
+    "Client",
     "Depends",
     "ErrorCode",
     "ErrorInfo",
