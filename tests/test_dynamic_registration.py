@@ -358,3 +358,153 @@ class TestDynamicBusRegistration:
             with pytest.raises(RuntimeError, match="dynamic event binding"):
                 await bus.add_subscriber("late.topic", lambda: None)
             assert "late.topic" not in bus.subscriptions
+
+
+class _RpcService:
+    def __init__(self, app: App, rpc) -> None:
+        self._app = app
+        self._rpc = rpc
+        self.calls = 0
+
+    def foo(self, value: int) -> int:
+        self.calls += 1
+        return value + 1
+
+    def register(self) -> None:
+        self._rpc.method("foo")(self.foo)
+
+
+class _RpcServiceValidated:
+    def foo(self, value: int) -> int:
+        return value
+
+
+class _TaskService:
+    def __init__(self, app: App, worker) -> None:
+        self._app = app
+        self._worker = worker
+        self.seen: list[str] = []
+
+    def job(self, value: str) -> None:
+        self.seen.append(value)
+
+    def register(self) -> None:
+        self._worker.task("job")(self.job)
+
+
+class _BusService:
+    def __init__(self, app: App, bus) -> None:
+        self._app = app
+        self._bus = bus
+        self.seen: list[int] = []
+
+    def on_user(self, user_id: int) -> None:
+        self.seen.append(user_id)
+
+    def register(self) -> None:
+        self._bus.subscribe("user.created")(self.on_user)
+
+
+class TestDynamicRegistrationBoundMethods:
+    async def test_method_decorator_idempotent_for_bound_method(self, app: App, rpc):
+        svc = _RpcService(app, rpc)
+        svc.register()
+        svc.register()  # fresh bound method object
+        assert len(rpc.methods) == 1
+        await rpc.consume()
+        assert await call(app, "app.foo", 1) == 2
+        assert svc.calls == 1
+
+    async def test_add_method_idempotent_for_bound_method(self, app: App, rpc):
+        svc = _RpcService(app, rpc)
+        await rpc.add_method("foo", svc.foo)
+        again = await rpc.add_method("foo", svc.foo)  # fresh bound method object
+        assert again is rpc.methods["foo"].fn
+        assert len(rpc.methods) == 1
+        await rpc.consume()
+        assert await call(app, "app.foo", 2) == 3
+        assert svc.calls == 1
+
+    async def test_add_method_bound_method_same_handler_different_options_raises(self, app: App, rpc):
+        svc = _RpcServiceValidated()
+        rpc.method("foo", validate_types=True)(svc.foo)
+        with pytest.raises(RegistrationAlreadyExistsError):
+            await rpc.add_method("foo", svc.foo)
+
+    async def test_task_decorator_idempotent_for_bound_method(self, app: App, worker):
+        svc = _TaskService(app, worker)
+        svc.register()
+        svc.register()
+        assert len(worker.tasks) == 1
+        await worker.consume()
+        await send(app, "app.job", "x")
+        assert svc.seen == ["x"]
+
+    async def test_add_task_idempotent_for_bound_method(self, app: App, worker):
+        svc = _TaskService(app, worker)
+        await worker.add_task("job", svc.job)
+        again = await worker.add_task("job", svc.job)
+        assert again is worker.tasks["job"].fn
+        assert len(worker.tasks) == 1
+        await worker.consume()
+        await send(app, "app.job", "y")
+        assert svc.seen == ["y"]
+
+    async def test_subscribe_decorator_deduplicates_bound_method(self, app: App, bus):
+        svc = _BusService(app, bus)
+        svc.register()
+        svc.register()
+        assert len(bus.subscriptions["user.created"]) == 1
+        await bus.consume()
+        await emit(app, "user.created", user_id=7)
+        assert svc.seen == [7]
+
+    async def test_add_subscriber_deduplicates_bound_method(self, app: App, bus):
+        svc = _BusService(app, bus)
+        await bus.add_subscriber("user.created", svc.on_user)
+        again = await bus.add_subscriber("user.created", svc.on_user)
+        existing = bus.subscriptions["user.created"][0].fn
+        assert again is existing
+        assert len(bus.subscriptions["user.created"]) == 1
+        await bus.consume()
+        await emit(app, "user.created", user_id=9)
+        assert svc.seen == [9]
+
+    async def test_remove_subscriber_by_bound_method(self, app: App, bus):
+        svc = _BusService(app, bus)
+        bus.subscribe("user.created")(svc.on_user)
+        await bus.consume()
+        await emit(app, "user.created", user_id=1)
+        await bus.remove_subscriber("user.created", svc.on_user)
+        await emit(app, "user.created", user_id=2)
+        assert svc.seen == [1]
+
+    async def test_remove_subscriber_by_fresh_bound_method_while_consuming(self, app: App, bus):
+        svc = _BusService(app, bus)
+        await bus.add_subscriber("user.created", svc.on_user)
+        await bus.consume()
+        await emit(app, "user.created", user_id=3)
+        await bus.remove_subscriber("user.created", svc.on_user)  # fresh bound method object
+        await emit(app, "user.created", user_id=4)
+        assert svc.seen == [3]
+
+    async def test_add_subscriber_bound_method_same_handler_different_options_raises(self, app: App, bus):
+        class Svc:
+            def on_user(self, user_id: int) -> None:
+                return None
+
+        svc = Svc()
+        bus.subscribe("user.created", validate_types=True)(svc.on_user)
+        with pytest.raises(RegistrationAlreadyExistsError):
+            await bus.add_subscriber("user.created", svc.on_user)
+
+    async def test_same_function_different_instances_not_deduplicated(self, app: App, bus):
+        svc1 = _BusService(app, bus)
+        svc2 = _BusService(app, bus)
+        await bus.add_subscriber("user.created", svc1.on_user)
+        await bus.add_subscriber("user.created", svc2.on_user)
+        assert len(bus.subscriptions["user.created"]) == 2
+        await bus.consume()
+        await emit(app, "user.created", user_id=5)
+        assert svc1.seen == [5]
+        assert svc2.seen == [5]

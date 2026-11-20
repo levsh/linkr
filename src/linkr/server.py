@@ -36,6 +36,26 @@ logger = logging.getLogger("linkr")
 _current_request: ContextVar[Request | None] = ContextVar("linkr_current_request", default=None)
 
 
+def _unwrap_handler(fn: Callable[..., Any]) -> Callable[..., Any]:
+    return getattr(fn, "__wrapped__", fn)
+
+
+def _same_handler(left: Callable[..., Any], right: Callable[..., Any]) -> bool:
+    if left is right:
+        return True
+    left_orig = _unwrap_handler(left)
+    right_orig = _unwrap_handler(right)
+    if left_orig is right_orig:
+        return True
+    left_func = getattr(left_orig, "__func__", None)
+    right_func = getattr(right_orig, "__func__", None)
+    if left_func is not None and right_func is not None:
+        return left_func is right_func and getattr(left_orig, "__self__", None) is getattr(
+            right_orig, "__self__", None
+        )
+    return False
+
+
 def get_current_request() -> Request:
     """Get the request being dispatched in this async context.
 
@@ -465,12 +485,8 @@ class RPC(_Server):
         self._validate_handler(fn)
         existing = self._handlers.get(key)
         if existing is not None:
-            existing_fn = existing.fn
-            existing_orig = getattr(existing_fn, "__wrapped__", existing_fn)
-            incoming_orig = getattr(fn, "__wrapped__", fn)
-            same_handler = existing_fn is fn or existing_orig is fn or existing_orig is incoming_orig
-            if same_handler and existing.options == options:
-                return existing_fn
+            if _same_handler(existing.fn, fn) and existing.options == options:
+                return existing.fn
             raise RegistrationAlreadyExistsError(
                 f"rpc handler already registered for {queue!r}: {leaf!r}",
                 kind="method",
@@ -848,12 +864,8 @@ class Worker(_Server):
         self._validate_handler(fn)
         existing = self._handlers.get(key)
         if existing is not None:
-            existing_fn = existing.fn
-            existing_orig = getattr(existing_fn, "__wrapped__", existing_fn)
-            incoming_orig = getattr(fn, "__wrapped__", fn)
-            same_handler = existing_fn is fn or existing_orig is fn or existing_orig is incoming_orig
-            if same_handler and existing.options == options:
-                return existing_fn
+            if _same_handler(existing.fn, fn) and existing.options == options:
+                return existing.fn
             raise RegistrationAlreadyExistsError(
                 f"task handler already registered for {queue!r}: {leaf!r}",
                 kind="task",
@@ -1116,10 +1128,7 @@ class Bus(_Server):
     def _find_subscriber(self, topic: str, handler: Callable[..., Any]) -> HandlerInfo | None:
         subscribers = self._subscribers_by_topic.get(topic, [])
         for info in subscribers:
-            fn = info.fn
-            wrapped_fn = getattr(fn, "__wrapped__", None)
-            wrapped_handler = getattr(handler, "__wrapped__", None)
-            if fn is handler or wrapped_fn is handler or fn is wrapped_handler:
+            if _same_handler(info.fn, handler):
                 return info
         return None
 
@@ -1203,10 +1212,7 @@ class Bus(_Server):
             else:
                 index = None
                 for i, info in enumerate(subscribers):
-                    fn = info.fn
-                    wrapped_fn = getattr(fn, "__wrapped__", None)
-                    wrapped_handler = getattr(handler, "__wrapped__", None)
-                    if fn is handler or wrapped_fn is handler or fn is wrapped_handler:
+                    if _same_handler(info.fn, handler):
                         index = i
                         break
                 if index is None:
