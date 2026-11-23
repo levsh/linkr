@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
@@ -79,6 +80,19 @@ class HealthStatus:
 
     ready: bool
     health: bool | None
+    details: Mapping[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        if self.details is None:
+            return
+        details = dict(self.details)
+        queues = details.get("queues")
+        if isinstance(queues, (list, tuple)):
+            normalized_queues = tuple(
+                MappingProxyType(dict(item)) if isinstance(item, Mapping) else item for item in queues
+            )
+            details["queues"] = normalized_queues
+        object.__setattr__(self, "details", MappingProxyType(details))
 
 
 class QueueOptions:

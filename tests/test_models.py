@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
+from types import MappingProxyType
 from uuid import UUID
 
 import pytest
@@ -119,12 +120,22 @@ class TestHealthStatus:
 
         assert status.ready is True
         assert status.health is False
+        assert status.details is None
 
     def test_not_ready_health_is_none(self):
         status = HealthStatus(ready=False, health=None)
 
         assert status.ready is False
         assert status.health is None
+        assert status.details is None
+
+    def test_details_normalized_to_mapping_proxy(self):
+        status = HealthStatus(ready=True, health=False, details={"reason": "backend_check_failed"})
+
+        assert isinstance(status.details, MappingProxyType)
+        assert dict(status.details) == {"reason": "backend_check_failed"}
+        with pytest.raises(TypeError):
+            status.details["reason"] = "other"  # type: ignore[index]
 
     def test_frozen(self):
         status = HealthStatus(ready=True, health=True)

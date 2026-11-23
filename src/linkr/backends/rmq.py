@@ -862,50 +862,146 @@ class RmqBackend(Backend):
         robust_message = self._to_robust_message(message)
         await self._exchanges["event"].publish(robust_message, routing_key=topic)
 
-    async def healthcheck(self) -> HealthStatus:
-        """Return backend readiness and health status."""
+    async def _healthcheck_queue(
+        self,
+        probe_channel: AbstractChannel,
+        mode: str,
+        logical_queue: str,
+    ) -> dict[str, Any] | None:
+        queue_name = self.queue_name_to_rmq_queue_name(logical_queue, mode)  # type: ignore[arg-type]
+        try:
+            rmq_queue = await probe_channel.declare_queue(queue_name, passive=True)
+        except Exception:
+            return {
+                "mode": mode,
+                "queue": logical_queue,
+                "reason": "unavailable",
+            }
+        decl = getattr(rmq_queue, "declaration_result", None)
+        consumer_count = getattr(decl, "consumer_count", None) if decl is not None else None
+        if consumer_count is None:
+            consumer_count = getattr(rmq_queue, "consumer_count", None)
+        if consumer_count is None or int(consumer_count) <= 0:
+            return {
+                "mode": mode,
+                "queue": logical_queue,
+                "reason": "no_consumer",
+            }
+        return None
+
+    async def healthcheck(self, fast: bool | None = None) -> HealthStatus:
+        """Return backend readiness and health status.
+
+        Readiness is false when the backend is not initialized or is closed.
+        When ready, health is false if the transport connection is unavailable.
+        Queue checks are performed on a dedicated probe channel to avoid closing
+        the main channel on passive-declare channel errors.
+
+        Args:
+            fast: When true, check connection/transport readiness only. When
+                false or None, also check active local consumers and broker
+                queue consumers.
+        """
         ready = bool(self._initialized and not self._closed)
         if not ready:
-            return HealthStatus(ready=False, health=None)
+            return HealthStatus(
+                ready=False,
+                health=None,
+                details={"connection": "error"},
+            )
 
         conn = self._connection
         ch = self._channel
-        if (
-            conn is None
-            or bool(getattr(conn, "is_closed", True))
-            or ch is None
-            or bool(getattr(ch, "is_closed", True))
-        ):
-            return HealthStatus(ready=True, health=False)
+        if conn is None or bool(getattr(conn, "is_closed", True)) or ch is None or bool(getattr(ch, "is_closed", True)):
+            return HealthStatus(
+                ready=True,
+                health=False,
+                details={"connection": "error"},
+            )
 
-        active: list[tuple[str, str]] = [
-            (mode, logical_queue)
+        if fast is True:
+            return HealthStatus(
+                ready=True,
+                health=True,
+                details={"connection": "ok"},
+            )
+
+        active: list[tuple[str, str, AbstractChannel, Any, str]] = [
+            (mode, logical_queue, consumer_channel, rmq_queue, consumer_tag)
             for mode, queues in self._consumers.items()
-            for logical_queue in queues
+            for logical_queue, (consumer_channel, rmq_queue, consumer_tag) in queues.items()
         ]
         if not active:
-            return HealthStatus(ready=True, health=True)
-
-        channel = ch
-
-        async def _queue_has_consumers(mode: str, logical_queue: str) -> bool:
-            queue_name = self.queue_name_to_rmq_queue_name(logical_queue, mode)  # type: ignore[arg-type]
-            rmq_queue = await channel.declare_queue(queue_name, passive=True)
-            decl = getattr(rmq_queue, "declaration_result", None)
-            consumer_count = getattr(decl, "consumer_count", None) if decl is not None else None
-            if consumer_count is None:
-                consumer_count = getattr(rmq_queue, "consumer_count", None)
-            return consumer_count is not None and int(consumer_count) > 0
-
-        try:
-            results = await asyncio.gather(
-                *(_queue_has_consumers(mode, logical_queue) for mode, logical_queue in active),
-                return_exceptions=True,
+            return HealthStatus(
+                ready=True,
+                health=True,
+                details={"connection": "ok", "queues": "ok"},
             )
-        except Exception:
-            return HealthStatus(ready=True, health=False)
 
-        if any(isinstance(result, BaseException) or not result for result in results):
-            return HealthStatus(ready=True, health=False)
+        queue_issues: list[dict[str, Any]] = []
+        issue_queues: set[tuple[str, str]] = set()
+        for mode, logical_queue, consumer_channel, _rmq_queue, consumer_tag in active:
+            if not consumer_tag or consumer_channel is None or bool(getattr(consumer_channel, "is_closed", True)):
+                key = (mode, logical_queue)
+                if key not in issue_queues:
+                    issue_queues.add(key)
+                    queue_issues.append(
+                        {
+                            "mode": mode,
+                            "queue": logical_queue,
+                            "reason": "no_consumer",
+                        }
+                    )
 
-        return HealthStatus(ready=True, health=True)
+        queues_to_probe = [
+            (mode, logical_queue) for mode, logical_queue, *_ in active if (mode, logical_queue) not in issue_queues
+        ]
+
+        if queues_to_probe:
+            try:
+                probe_channel = await conn.channel()
+            except Exception:
+                return HealthStatus(
+                    ready=True,
+                    health=False,
+                    details={"connection": "error"},
+                )
+
+            try:
+                results = await asyncio.gather(
+                    *(
+                        self._healthcheck_queue(probe_channel, mode, logical_queue)
+                        for mode, logical_queue in queues_to_probe
+                    ),
+                    return_exceptions=True,
+                )
+            finally:
+                try:
+                    await probe_channel.close()
+                except Exception:
+                    logger.exception("Failed to close healthcheck probe channel")
+
+            for (mode, logical_queue), result in zip(queues_to_probe, results, strict=False):
+                if isinstance(result, BaseException):
+                    queue_issues.append(
+                        {
+                            "mode": mode,
+                            "queue": logical_queue,
+                            "reason": "unavailable",
+                        }
+                    )
+                elif result is not None:
+                    queue_issues.append(result)
+
+        if queue_issues:
+            return HealthStatus(
+                ready=True,
+                health=False,
+                details={"connection": "ok", "queues": queue_issues},
+            )
+
+        return HealthStatus(
+            ready=True,
+            health=True,
+            details={"connection": "ok", "queues": "ok"},
+        )

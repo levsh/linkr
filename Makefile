@@ -26,7 +26,7 @@ typecheck:
 	$(RUN) mypy src
 
 test:
-	$(RUN) pytest -v
+	$(RUN) pytest -vv
 
 docs:
 	PYTHONPATH=src $(RUN) python scripts/generate_contract_docs.py

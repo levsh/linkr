@@ -1147,7 +1147,8 @@ class TestAppHealthcheck:
             backend_status = await backend.healthcheck()
             status = await app.healthcheck()
 
-            assert status == HealthStatus(ready=True, health=True)
+            assert status == backend_status
+            assert status.details == {"connection": "ok", "queues": "ok"}
             assert status is not backend_status
         finally:
             await app.close()
@@ -1162,20 +1163,32 @@ class TestAppHealthcheck:
 
     async def test_backend_not_ready_returns_not_ready(self):
         class NotReadyBackend(LocalBackend):
-            async def healthcheck(self) -> HealthStatus:
-                return HealthStatus(ready=False, health=None)
+            async def healthcheck(self, fast: bool | None = None) -> HealthStatus:
+                return HealthStatus(
+                    ready=False,
+                    health=None,
+                    details={"connection": "error"},
+                )
 
         app = App("app", backend=NotReadyBackend())
         await app.init()
         try:
-            assert await app.healthcheck() == HealthStatus(ready=False, health=None)
+            assert await app.healthcheck() == HealthStatus(
+                ready=False,
+                health=None,
+                details={"connection": "error"},
+            )
         finally:
             await app.close()
 
     async def test_backend_unhealthy_returns_new_status(self):
         class UnhealthyBackend(LocalBackend):
-            async def healthcheck(self) -> HealthStatus:
-                return HealthStatus(ready=True, health=False)
+            async def healthcheck(self, fast: bool | None = None) -> HealthStatus:
+                return HealthStatus(
+                    ready=True,
+                    health=False,
+                    details={"connection": "ok", "queues": [{"mode": "rpc", "queue": "svc", "reason": "no_consumer"}]},
+                )
 
         backend = UnhealthyBackend()
         app = App("app", backend=backend)
@@ -1184,19 +1197,20 @@ class TestAppHealthcheck:
             backend_status = await backend.healthcheck()
             status = await app.healthcheck()
 
-            assert status == HealthStatus(ready=True, health=False)
+            assert status == backend_status
             assert status is not backend_status
         finally:
             await app.close()
 
-    async def test_backend_error_returns_not_ready(self):
+    async def test_backend_error_propagates(self):
         class BrokenBackend(LocalBackend):
-            async def healthcheck(self) -> HealthStatus:
+            async def healthcheck(self, fast: bool | None = None) -> HealthStatus:
                 raise RuntimeError("boom")
 
         app = App("app", backend=BrokenBackend())
         await app.init()
         try:
-            assert await app.healthcheck() == HealthStatus(ready=False, health=None)
+            with pytest.raises(RuntimeError, match="boom"):
+                await app.healthcheck()
         finally:
             await app.close()

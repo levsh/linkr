@@ -37,13 +37,17 @@ await app.client.emit("user.created", {"user_id": 1})
 
 ## Health checks
 
-`App` and backends expose `healthcheck() -> HealthStatus(ready, health)`:
+`App` and backends expose `healthcheck(fast: bool | None = None) -> HealthStatus(ready, health, details)`:
 
-- `ready=False, health=None` — app/backend is not ready (not initialized, closed, or probe failed).
+- `ready=False, health=None` — app/backend is not ready or health check failed at transport level.
 - `ready=True, health=...` — backend is ready and `health` reflects dependency/consumer health (backend-specific).
+- `details` is a read-only mapping with stable, public diagnostics:
+  - `connection`: `"ok" | "error"`
+  - `queues`: `"ok" | [{"mode", "queue", "reason"}, ...]`
+  - queue issue `reason`: `"no_consumer" | "unavailable"`
+- `fast=True` checks connection/transport only. `fast=False` or `fast=None` performs full health checks, including queue/consumer checks where supported. If a check is not requested or a fail-fast connection issue is reported, the corresponding key is omitted from `details`.
 
-`App.healthcheck()` normalizes backend failures to `HealthStatus(ready=False, health=None)` and never returns the backend's `HealthStatus` instance.  
-`LocalBackend` reports healthy when ready; `RmqBackend` checks live AMQP connection/channel and broker-visible consumers for active queues (in parallel).
+`App.healthcheck()` returns `ready=False, health=None` without `details` when the app is closed. If the backend is not ready, it returns `ready=False, health=None` and preserves backend `details` when present. Backend exceptions are not swallowed. No backend-internal transport/channel/probe/exception details are exposed.
 
 ## Handlers, local names, and addressing
 

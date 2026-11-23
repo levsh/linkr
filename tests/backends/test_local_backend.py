@@ -207,7 +207,7 @@ class TestLocalBackend:
 
     async def test_event_no_subscribers_is_noop(self):
         app = App("app", backend=LocalBackend())
-        server = app.bus()
+        app.bus()
 
         async with app:
             await emit(app, "nobody.listens")
@@ -310,13 +310,26 @@ class TestLocalBackend:
     async def test_healthcheck_not_initialized(self):
         backend = LocalBackend()
 
-        assert await backend.healthcheck() == HealthStatus(ready=False, health=None)
+        assert await backend.healthcheck() == HealthStatus(
+            ready=False,
+            health=None,
+            details={"connection": "error"},
+        )
 
     async def test_healthcheck_ready(self):
         backend = LocalBackend()
         await backend.init()
 
-        assert await backend.healthcheck() == HealthStatus(ready=True, health=True)
+        assert await backend.healthcheck(fast=True) == HealthStatus(
+            ready=True,
+            health=True,
+            details={"connection": "ok"},
+        )
+        assert await backend.healthcheck() == HealthStatus(
+            ready=True,
+            health=True,
+            details={"connection": "ok", "queues": "ok"},
+        )
         await backend.close()
 
     async def test_healthcheck_after_close(self):
@@ -324,4 +337,8 @@ class TestLocalBackend:
         await backend.init()
         await backend.close()
 
-        assert await backend.healthcheck() == HealthStatus(ready=False, health=None)
+        assert await backend.healthcheck() == HealthStatus(
+            ready=False,
+            health=None,
+            details={"connection": "error"},
+        )

@@ -27,10 +27,10 @@ from linkr import (
 
 Application infrastructure, lifecycle, hooks/middleware, and client API. Handler registration and consuming are performed on mode servers.
 
-- **Lifecycle:** `init()`, `close(timeout=None)`, `healthcheck()`, async context manager
+- **Lifecycle:** `init()`, `close(timeout=None)`, `healthcheck(fast=None)`, async context manager
   - `init()` initializes backend and middleware.
   - `close(timeout=None)` stops consuming on all servers, closes middleware and backend (the `timeout` argument is reserved for future graceful-shutdown control and is currently unused).
-  - `healthcheck() -> HealthStatus` returns application readiness/health: if the app is closed or the backend is not ready/errors, returns `HealthStatus(ready=False, health=None)`; otherwise returns a new `HealthStatus(ready=True, health=<backend health>)` (not the backend instance). When `ready` is `False`, `health` is always `None`.
+  - `healthcheck(fast: bool | None = None) -> HealthStatus` returns application readiness/health. If the app is closed, returns `ready=False, health=None` without `details`. Otherwise it delegates to backend `healthcheck(fast=fast)`; if the backend is not ready, returns `ready=False, health=None` preserving backend `details` when present; if ready, returns a new status with backend `health/details`. Backend exceptions propagate. The status includes read-only public `details`: `connection` is `"ok"|"error"`; `queues` is `"ok"` or a tuple of problematic logical queues with `{"mode","queue","reason"}` where `reason` is `"no_consumer"` or `"unavailable"`. `fast=True` checks connection/transport only; `fast=False` or `fast=None` performs full health checks, including queue/consumer checks where supported. If a check is not requested or a fail-fast connection issue is reported, the corresponding key is omitted from `details`. `App.healthcheck()` never returns the backend instance and does not expose backend-internal transport details.
 - **Servers:**
   - `rpc(path: str | None = None, *, options=None, validate_types=None) -> RPC`
   - `worker(path: str | None = None, *, options=None, validate_types=None) -> Worker`
@@ -85,9 +85,9 @@ Method/task `name` must be a local leaf (no `.`). Common handler option: `valida
 
 ## Backends
 
-- `Backend` (ABC): `init`, `close`, `healthcheck() -> HealthStatus`, `consume_rpc(queue, handler, *, options=None)`, `consume_task(queue, handler, *, options=None)`, `consume_event(queue, topics, handler, *, options=None)`, `stop_consume_rpc(queue=None)`, `stop_consume_tasks(queue=None)`, `stop_consume_events(queue=None, topic=None)`, `request(queue, message, *, context=None) -> asyncio.Future[Message]`, `send(queue, message, *, context=None)`, `emit(topic, message, *, context=None)`
-- `LocalBackend(name=None)`: in-process backend, `reset()` class method; ignores transport queue options. `healthcheck()` reports `ready=False, health=None` when not initialized/closed, otherwise `ready=True, health=True`.
-- `RmqBackend(...)` (`linkr.backends.rmq`): RabbitMQ backend (`aio-pika`); see `RmqQueueOptions`. `healthcheck()` reports `ready=False, health=None` when not ready; when ready, checks connection/channel liveness and verifies that all active (currently consumed) queues have broker consumers via parallel passive queue declares (`health=False` if any check fails or any active queue has no consumers).
+- `Backend` (ABC): `init`, `close`, `healthcheck(fast: bool | None = None) -> HealthStatus`, `consume_rpc(queue, handler, *, options=None)`, `consume_task(queue, handler, *, options=None)`, `consume_event(queue, topics, handler, *, options=None)`, `stop_consume_rpc(queue=None)`, `stop_consume_tasks(queue=None)`, `stop_consume_events(queue=None, topic=None)`, `request(queue, message, *, context=None) -> asyncio.Future[Message]`, `send(queue, message, *, context=None)`, `emit(topic, message, *, context=None)`
+- `LocalBackend(name=None)`: in-process backend, `reset()` class method; ignores transport queue options. `healthcheck(fast=None)` reports `connection="error"` when not ready; otherwise `connection="ok"` and includes `queues="ok"` when `fast` is `False` or `None`.
+- `RmqBackend(...)` (`linkr.backends.rmq`): RabbitMQ backend (`aio-pika`); see `RmqQueueOptions`. `healthcheck(fast=None)` reports `connection/queues` status. `fast=True` checks connection/transport only; `fast=False` or `fast=None` performs full checks, including queue/consumer checks. When checked, `queues` contains only problematic logical queues with `reason="no_consumer"` or `reason="unavailable"`. No backend-internal transport/probe/exception details are exposed.
 
 ## Models and queue options
 
@@ -96,7 +96,7 @@ Method/task `name` must be a local leaf (no `.`). Common handler option: `valida
 - `Message(data: bytes, headers: dict)` — wire envelope
 - `ErrorInfo(error_code, error_message, error_details)`
 - `HandlerInfo` — registered handler metadata
-- `HealthStatus(ready: bool, health: bool | None)` — frozen readiness/health status; `health` is `None` when `ready` is `False`
+- `HealthStatus(ready: bool, health: bool | None, details: Mapping[str, Any] | None = None)` — frozen readiness/health status; `health` is `None` when `ready` is `False`; `details` is normalized to a read-only mapping with public `connection/queues` diagnostics
 - `QueueOptions` — marker base for backend-specific queue/consumer options
 - `RmqQueueOptions(...)` (`linkr.backends.rmq`) — RabbitMQ queue/consumer options (`durable`, `exclusive`, `auto_delete`, `passive`, `arguments`, `prefetch_count`, `extra`)
 

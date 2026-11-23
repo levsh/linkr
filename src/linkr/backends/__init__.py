@@ -209,5 +209,13 @@ class Backend(ABC):
         """
 
     @abstractmethod
-    async def healthcheck(self) -> HealthStatus:
-        """Return backend readiness and health status."""
+    async def healthcheck(self, fast: bool | None = None) -> HealthStatus:
+        """Return backend readiness and health status.
+
+        Args:
+            fast: When true, check connection/transport readiness only. When
+                false or None, perform the full health check, including
+                queue/consumer checks where supported. If a check is not
+                requested or a fail-fast connection issue is reported, the
+                corresponding key is omitted from `details`.
+        """

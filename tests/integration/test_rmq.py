@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from linkr import App, ErrorCode, RPCError
+from linkr import App, ErrorCode, HealthStatus, RPCError
 from linkr.backends.rmq import RmqBackend
 from tests.helpers import call, emit, send
 from tests.utils import get_ip
@@ -254,3 +254,39 @@ class TestRmqBackend:
         backend = make_backend(rabbitmq)
         await backend.close()
         await backend.close()
+
+    async def test_healthcheck(self, rabbitmq):
+        backend = make_backend(rabbitmq)
+        app = App(uid("health"), backend=backend)
+        srv = app.rpc()
+
+        @srv.method("ping")
+        def ping() -> str:
+            return "pong"
+
+        assert await backend.healthcheck() == HealthStatus(
+            ready=False,
+            health=None,
+            details={"connection": "error"},
+        )
+
+        async with app:
+            assert await app.healthcheck(fast=True) == HealthStatus(
+                ready=True,
+                health=True,
+                details={"connection": "ok"},
+            )
+            assert await app.healthcheck() == HealthStatus(
+                ready=True,
+                health=True,
+                details={"connection": "ok", "queues": "ok"},
+            )
+
+            await srv.consume()
+            assert await app.healthcheck() == HealthStatus(
+                ready=True,
+                health=True,
+                details={"connection": "ok", "queues": "ok"},
+            )
+
+        assert await app.healthcheck() == HealthStatus(ready=False, health=None)

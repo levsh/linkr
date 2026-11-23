@@ -68,12 +68,24 @@ class LocalBackend(Backend):
         await self.stop_consume_tasks()
         await self.stop_consume_events()
 
-    async def healthcheck(self) -> HealthStatus:
-        """Return backend readiness and health status."""
+    async def healthcheck(self, fast: bool | None = None) -> HealthStatus:
+        """Return backend readiness and health status.
+
+        Args:
+            fast: When true, check connection/transport readiness only. When
+                false or None, include queue/consumer status.
+        """
         ready = self._initialized and not self._closed
         if not ready:
-            return HealthStatus(ready=False, health=None)
-        return HealthStatus(ready=True, health=True)
+            return HealthStatus(
+                ready=False,
+                health=None,
+                details={"connection": "error"},
+            )
+        details: dict[str, Any] = {"connection": "ok"}
+        if fast is not True:
+            details["queues"] = "ok"
+        return HealthStatus(ready=True, health=True, details=details)
 
     async def consume_rpc(
         self,

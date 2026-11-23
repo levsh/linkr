@@ -308,17 +308,23 @@ class App:
     # Health
     # ------------------------------------------------------------------
 
-    async def healthcheck(self) -> HealthStatus:
-        """Return application readiness and health status."""
+    async def healthcheck(self, fast: bool | None = None) -> HealthStatus:
+        """Return application readiness and health status.
+
+        Args:
+            fast: When true, check connection/transport readiness only. When
+                false or None, perform the full backend health check.
+        """
         if self._closed:
             return HealthStatus(ready=False, health=None)
-        try:
-            backend_status = await self._backend.healthcheck()
-        except Exception:
-            return HealthStatus(ready=False, health=None)
+        backend_status = await self._backend.healthcheck(fast=fast)
         if not backend_status.ready:
-            return HealthStatus(ready=False, health=None)
-        return HealthStatus(ready=True, health=backend_status.health)
+            return HealthStatus(ready=False, health=None, details=backend_status.details)
+        return HealthStatus(
+            ready=True,
+            health=backend_status.health,
+            details=backend_status.details,
+        )
 
     # ------------------------------------------------------------------
     # Exception handlers
