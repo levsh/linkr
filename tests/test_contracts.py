@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from linkr import App, Depends, LocalBackend
 from linkr.contracts import (
     AppContract,
@@ -180,7 +182,48 @@ class TestDescribeContracts:
         assert "app.describe" in spec["methods"]
 
 
-class TestDescribeCrossApp:
+    async def test_expose_describe_idempotent(self, app: App):
+        root = app.rpc()
+        fn1 = expose_describe(app, "describe", server=root)
+        fn2 = expose_describe(app, "describe", server=root)
+
+        assert fn1 is fn2
+        await root.consume()
+
+        spec = await call(app, "app.describe")
+        assert spec["contract"] == "linkr/1.0-alpha"
+        assert list(spec["methods"]).count("app.describe") == 1
+
+    async def test_expose_describe_conflicting_options_raise(self, app: App):
+        from linkr import RegistrationAlreadyExistsError
+
+        root = app.rpc()
+        expose_describe(app, "describe", server=root, validate_types=True)
+
+        with pytest.raises(RegistrationAlreadyExistsError):
+            expose_describe(app, "describe", server=root, validate_types=False)
+
+    async def test_expose_describe_conflicting_app_raises(self, app: App):
+        from linkr import RegistrationAlreadyExistsError
+
+        other = App("other", backend=LocalBackend())
+        root = app.rpc()
+        expose_describe(app, "describe", server=root)
+
+        with pytest.raises(RegistrationAlreadyExistsError):
+            expose_describe(other, "describe", server=root)
+
+        await other.close()
+
+    async def test_expose_describe_default_name_idempotent(self, app: App):
+        root = app.rpc()
+        fn1 = expose_describe(app, server=root)
+        fn2 = expose_describe(app, server=root)
+
+        assert fn1 is fn2
+        await root.consume()
+        spec = await call(app, "app.describe")
+        assert "app.describe" in spec["methods"]
     async def test_cross_app_rpc_describe(self):
         backend = LocalBackend()
         server_app = App("server", backend=backend)

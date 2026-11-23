@@ -977,11 +977,29 @@ def expose_describe(
     server: Any | None = None,
     **handler_options: Any,
 ) -> Callable[[], dict[str, Any]]:
+    """Register a describe RPC handler and return the handler function.
+
+    Registration is idempotent for the same app, name, server, and handler
+    options. A conflicting registration on the same name raises the normal
+    registration error.
+    """
     if server is None:
         server = app.rpc()
+
+    existing_info = getattr(server, "methods", {}).get(name)
+    if existing_info is not None:
+        orig = inspect.unwrap(existing_info.fn)
+        if (
+            getattr(orig, "linkr_describe_app", None) is app
+            and getattr(orig, "linkr_describe_name", None) == name
+            and existing_info.options == handler_options
+        ):
+            return orig
 
     def describe_handler() -> dict[str, Any]:
         return describe_app(app).to_dict()
 
+    describe_handler.linkr_describe_app = app  # type: ignore[attr-defined]
+    describe_handler.linkr_describe_name = name  # type: ignore[attr-defined]
     server.method(name, **handler_options)(describe_handler)
     return describe_handler
