@@ -399,6 +399,144 @@ class TestRmqBackend:
         assert probe_created is False
         assert channel.declare_queue_calls == []
 
+    async def test_init_uses_dsn_and_ignores_conflicting_connection_params(self, monkeypatch):
+        calls: dict[str, Any] = {}
+
+        class DummyQueue:
+            name = "cbq"
+
+            async def consume(self, _handler):
+                return None
+
+            async def delete(self, *args, **kwargs):
+                return None
+
+        class DummyChannel:
+            default_exchange = _FakeExchange()
+            is_closed = False
+
+            async def declare_exchange(self, *_args, **_kwargs):
+                return _FakeExchange()
+
+            async def declare_queue(self, *_args, **_kwargs):
+                return DummyQueue()
+
+            async def set_qos(self, **_kwargs):
+                return None
+
+            async def close(self):
+                return None
+
+        class DummyConnection:
+            is_closed = False
+
+            async def channel(self):
+                return DummyChannel()
+
+            async def close(self):
+                return None
+
+        async def fake_connect_robust(*args, **kwargs):
+            calls["args"] = args
+            calls["kwargs"] = kwargs
+            return DummyConnection()
+
+        monkeypatch.setattr("linkr.backends.rmq.aio_pika.connect_robust", fake_connect_robust)
+
+        backend = RmqBackend(
+            dsn="amqp://u:p@broker:1234/vh",
+            host="ignored",
+            port=9999,
+            login="ignored-user",
+            password="ignored-pass",
+            virtualhost="/ignored",
+            auth_mechanism="EXTERNAL",
+            heartbeat=7,
+            blocked_connection_timeout=9,
+            connection_name="myconn",
+        )
+        await backend.init()
+
+        assert calls["args"] == ("amqp://u:p@broker:1234/vh",)
+        kwargs = calls["kwargs"]
+        assert kwargs["heartbeat"] == 7
+        assert kwargs["blocked_connection_timeout"] == 9
+        assert kwargs["client_properties"] == {"connection_name": "myconn"}
+        assert "host" not in kwargs
+        assert "port" not in kwargs
+        assert "virtualhost" not in kwargs
+        assert "login" not in kwargs
+        assert "password" not in kwargs
+
+        await backend.close()
+
+    async def test_init_without_dsn_uses_connection_params(self, monkeypatch):
+        calls: dict[str, Any] = {}
+
+        class DummyQueue:
+            name = "cbq"
+
+            async def consume(self, _handler):
+                return None
+
+            async def delete(self, *args, **kwargs):
+                return None
+
+        class DummyChannel:
+            default_exchange = _FakeExchange()
+            is_closed = False
+
+            async def declare_exchange(self, *_args, **_kwargs):
+                return _FakeExchange()
+
+            async def declare_queue(self, *_args, **_kwargs):
+                return DummyQueue()
+
+            async def set_qos(self, **_kwargs):
+                return None
+
+            async def close(self):
+                return None
+
+        class DummyConnection:
+            is_closed = False
+
+            async def channel(self):
+                return DummyChannel()
+
+            async def close(self):
+                return None
+
+        async def fake_connect_robust(*args, **kwargs):
+            calls["args"] = args
+            calls["kwargs"] = kwargs
+            return DummyConnection()
+
+        monkeypatch.setattr("linkr.backends.rmq.aio_pika.connect_robust", fake_connect_robust)
+
+        backend = RmqBackend(
+            host="rabbit",
+            port=5673,
+            login="user",
+            password="pass",
+            virtualhost="/vh",
+            heartbeat=11,
+            blocked_connection_timeout=13,
+        )
+        await backend.init()
+
+        assert calls["args"] == ()
+        kwargs = calls["kwargs"]
+        assert kwargs["host"] == "rabbit"
+        assert kwargs["port"] == 5673
+        assert kwargs["virtualhost"] == "/vh"
+        assert kwargs["login"] == "user"
+        assert kwargs["password"] == "pass"
+        assert kwargs["heartbeat"] == 11
+        assert kwargs["blocked_connection_timeout"] == 13
+
+        await backend.close()
+
     async def test_healthcheck_passive_declare_error(self):
         backend, channel, _exchanges, _callback = _wire_backend()
         consumer_channel = _FakeChannel()

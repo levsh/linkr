@@ -74,6 +74,7 @@ class RmqBackend(Backend):
         password: str = "guest",
         virtualhost: str = "/",
         *,
+        dsn: str | None = None,
         ssl_context: ssl.SSLContext | None = None,
         auth_mechanism: str = "PLAIN",
         connection_name: str | None = None,
@@ -88,13 +89,18 @@ class RmqBackend(Backend):
         Create a RabbitMQ backend.
 
         Args:
-            host: RabbitMQ host.
-            port: RabbitMQ port.
-            login: Login used for AMQP authentication.
-            password: Password used for AMQP authentication.
-            virtualhost: AMQP virtual host.
+            host: RabbitMQ host. Ignored when *dsn* is provided.
+            port: RabbitMQ port. Ignored when *dsn* is provided.
+            login: Login used for AMQP authentication. Ignored when *dsn* is provided.
+            password: Password used for AMQP authentication. Ignored when *dsn* is provided.
+            virtualhost: AMQP virtual host. Ignored when *dsn* is provided.
+            dsn: AMQP connection URL (e.g. ``amqp://guest:guest@localhost:5672/``).
+                When provided, connection parameters conflicting with the DSN
+                (``host``, ``port``, ``login``, ``password``, ``virtualhost``,
+                ``auth_mechanism``) are ignored.
             ssl_context: Optional ``ssl.SSLContext`` for a TLS connection.
             auth_mechanism: SASL authentication mechanism (default ``"PLAIN"``).
+                Ignored when *dsn* is provided.
             connection_name: Optional name exposed to the broker.
             exchange: Exchange name(s). A single ``str`` creates one shared
                 TOPIC exchange for all modes; a ``dict[Mode, str]`` creates
@@ -112,6 +118,7 @@ class RmqBackend(Backend):
             results_queue_prefix: Prefix for the exclusive reply queue used by
                 RPC calls. Defaults to ``"linkr.res."``.
         """
+        self._dsn = dsn
         self._host = host
         self._port = port
         self._login = login
@@ -218,9 +225,6 @@ class RmqBackend(Backend):
 
             try:
                 connect_kwds: dict[str, Any] = {
-                    "host": self._host,
-                    "port": self._port,
-                    "virtualhost": self._virtualhost,
                     "heartbeat": self._heartbeat,
                     "blocked_connection_timeout": self._blocked_connection_timeout,
                 }
@@ -228,16 +232,25 @@ class RmqBackend(Backend):
                 if self._ssl_context is not None:
                     connect_kwds["ssl_context"] = self._ssl_context
 
-                if self._auth_mechanism == "PLAIN":
-                    connect_kwds["login"] = self._login
-                    connect_kwds["password"] = self._password
-
                 if self._connection_name:
                     connect_kwds["client_properties"] = {
                         "connection_name": self._connection_name,
                     }
 
-                self._connection = await aio_pika.connect_robust(**connect_kwds)
+                if self._dsn is not None:
+                    self._connection = await aio_pika.connect_robust(self._dsn, **connect_kwds)
+                else:
+                    connect_kwds.update(
+                        {
+                            "host": self._host,
+                            "port": self._port,
+                            "virtualhost": self._virtualhost,
+                        }
+                    )
+                    if self._auth_mechanism == "PLAIN":
+                        connect_kwds["login"] = self._login
+                        connect_kwds["password"] = self._password
+                    self._connection = await aio_pika.connect_robust(**connect_kwds)
                 self._channel = await self._connection.channel()
 
                 for mode in ("rpc", "task", "event"):

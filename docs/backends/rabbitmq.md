@@ -25,6 +25,9 @@ backend = RmqBackend(
     exchange="linkr",  # single exchange name or per-mode mapping
 )
 
+# or via DSN (conflicting connection params are ignored)
+backend = RmqBackend(dsn="amqp://guest:guest@localhost:5672/")
+
 app = App("orders", backend=backend)
 rpc = app.rpc()
 
@@ -40,10 +43,10 @@ await rpc.consume()
 
 `RmqBackend(...)` parameters:
 
-- `host` (default `"localhost"`), `port` (default `5672`)
-- `login`, `password`, `virtualhost`
-- `ssl_context`: optional `ssl.SSLContext` for TLS connections
-- `auth_mechanism` (default `"PLAIN"`)
+- `dsn` (default `None`): AMQP connection URL (e.g. `amqp://user:pass@host:5672/vhost`, `amqps://...`). When provided, conflicting connection parameters (`host`, `port`, `login`, `password`, `virtualhost`, `auth_mechanism`) are ignored. `heartbeat`, `blocked_connection_timeout`, `ssl_context`, and `connection_name` still apply.
+- `host` (default `"localhost"`), `port` (default `5672`), `login`, `password`, `virtualhost` — used when `dsn` is not provided.
+- `ssl_context`: optional `ssl.SSLContext` for a TLS connection
+- `auth_mechanism` (default `"PLAIN"`, used when `dsn` is not provided)
 - `connection_name`: optional AMQP client connection name
 - `exchange` (default `"linkr"`):
   - **Single exchange (default):** `exchange="linkr"` (str) — one topic exchange named `linkr` shared by RPC, tasks, and events. Queues per logical queue: `linkr.rpc.<queue>`, `linkr.tasks.<queue>`, `linkr.events.<queue>`.
