@@ -12,6 +12,8 @@ from linkr.contracts import (
     describe_app_json,
     expose_describe,
 )
+from linkr.middleware import AppMiddleware
+from linkr.middleware.gzip import GzipMiddleware
 from tests.helpers import call
 
 
@@ -56,6 +58,7 @@ class TestDescribeContracts:
         assert rpc["queue"] == "app.math"
         assert rpc["call"] == "app.math.add"
         assert rpc["description"] == "Add two numbers."
+        assert rpc["features"] == []
         assert rpc["output"]["schema"]["type"] == "integer"
         assert [p["name"] for p in rpc["input"]["params"]] == ["x", "y"]
         assert rpc["input"]["args_schema"]["type"] == "array"
@@ -68,6 +71,7 @@ class TestDescribeContracts:
         assert task["name"] == "send"
         assert task["queue"] == "app.email"
         assert task["send"] == "app.email.send"
+        assert task["features"] == []
         assert task["output"] is None
         params = {p["name"]: p for p in task["input"]["params"]}
         assert params["template"]["required"] is False
@@ -81,6 +85,7 @@ class TestDescribeContracts:
         sub = event["subscribers"][0]
         assert sub["handler"] == "on_user"
         assert sub["queue_template"] == "app.<instance_id>"
+        assert sub["features"] == []
         assert sub["payload"]["kwds_schema"]["type"] == "object"
         assert "user_id" in sub["payload"]["kwds_schema"]["properties"]
 
@@ -263,3 +268,74 @@ class TestDescribeHtml:
         html_doc = describe_app_html(app, include={"methods"})
         assert "app.ping" in html_doc
         assert "app.work" not in html_doc
+
+
+class _TracingMiddleware(AppMiddleware):
+    features = ("tracing", "gzip", "tracing", "")
+
+
+class _DynamicFeatureMiddleware(AppMiddleware):
+    def features(self):
+        return ["auth", "auth"]
+
+
+class TestDescribeFeatures:
+    async def test_middleware_features_in_contract(self):
+        app = App(
+            "app",
+            backend=LocalBackend(),
+            middlewares=[GzipMiddleware(), _TracingMiddleware(), _DynamicFeatureMiddleware()],
+        )
+        rpc = app.rpc()
+        worker = app.worker("jobs")
+        bus = app.bus()
+
+        @rpc.method("ping")
+        def ping() -> str:
+            return "pong"
+
+        @worker.task("run")
+        def run() -> None:
+            return None
+
+        @bus.subscribe("evt")
+        def on_evt() -> None:
+            return None
+
+        spec = describe_app(app).to_dict()
+        # deduplicated, stable order (app middlewares then wire middlewares, as applied)
+        expected = ["tracing", "gzip", "auth"]
+        assert spec["methods"]["app.ping"]["features"] == expected
+        assert spec["tasks"]["app.jobs.run"]["features"] == expected
+        assert spec["events"]["evt"]["subscribers"][0]["features"] == expected
+
+        html_doc = describe_app_html(app)
+        assert "feature: gzip" in html_doc
+        assert "badge-feature" in html_doc
+
+    async def test_default_no_features(self, app: App):
+        rpc = app.rpc()
+
+        @rpc.method("ping")
+        def ping() -> str:
+            return "pong"
+
+        assert describe_app(app).to_dict()["methods"]["app.ping"]["features"] == []
+
+    async def test_features_per_bus_server(self):
+        app = App("app", backend=LocalBackend(), middlewares=[GzipMiddleware()])
+        bus_a = app.bus("a")
+        bus_b = app.bus("b")
+
+        @bus_a.subscribe("same")
+        def on_a() -> None:
+            return None
+
+        @bus_b.subscribe("same")
+        def on_b() -> None:
+            return None
+
+        spec = describe_app(app).to_dict()
+        subs = spec["events"]["same"]["subscribers"]
+        assert len(subs) == 2
+        assert all(sub["features"] == ["gzip"] for sub in subs)

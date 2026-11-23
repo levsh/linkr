@@ -23,7 +23,7 @@ from .hooks import (
     MessageDroppedEvent,
     RequestReceivedEvent,
 )
-from .middleware import apply_middleware, wrap_app_server, wrap_wire_server
+from .middleware import AppMiddleware, WireMiddleware, apply_middleware, wrap_app_server, wrap_wire_server
 from .models import ErrorInfo, HandlerInfo, Message, QueueOptions, Request, Response
 from .serializer import Serializer
 from .utils import normalize_queue_options, topic_to_regex
@@ -50,9 +50,7 @@ def _same_handler(left: Callable[..., Any], right: Callable[..., Any]) -> bool:
     left_func = getattr(left_orig, "__func__", None)
     right_func = getattr(right_orig, "__func__", None)
     if left_func is not None and right_func is not None:
-        return left_func is right_func and getattr(left_orig, "__self__", None) is getattr(
-            right_orig, "__self__", None
-        )
+        return left_func is right_func and getattr(left_orig, "__self__", None) is getattr(right_orig, "__self__", None)
     return False
 
 
@@ -77,6 +75,7 @@ class _Server:
         *,
         options: QueueOptions | Sequence[QueueOptions] | None = None,
         validate_types: bool | None = None,
+        middlewares: Sequence[AppMiddleware | WireMiddleware] | None = None,
     ) -> None:
         if path is not None and (not isinstance(path, str) or path == ""):
             raise ValueError("server path must not be empty")
@@ -88,8 +87,11 @@ class _Server:
         self._validate_types = validate_types
         self._serializer = app.serializers[0]
         self._serializers_map = {s.name: s for s in app.serializers}
-        self._app_mw = app.app_middlewares
-        self._wire_mw = app.wire_middlewares
+        self._own_middlewares = tuple(middlewares or ())
+        own_app_mw = [mw for mw in self._own_middlewares if isinstance(mw, AppMiddleware)]
+        own_wire_mw = [mw for mw in self._own_middlewares if isinstance(mw, WireMiddleware)]
+        self._app_mw = [*app.app_middlewares, *own_app_mw]
+        self._wire_mw = [*app.wire_middlewares, *own_wire_mw]
 
     # ------------------------------------------------------------------
     # Properties
@@ -114,6 +116,16 @@ class _Server:
     @property
     def options(self) -> tuple[QueueOptions, ...] | None:
         return self._options
+
+    @property
+    def own_middlewares(self) -> tuple[AppMiddleware | WireMiddleware, ...]:
+        """Middlewares configured on this server (excluding app-level middlewares)."""
+        return self._own_middlewares
+
+    @property
+    def middlewares(self) -> tuple[AppMiddleware | WireMiddleware, ...]:
+        """Middlewares applied to handlers of this server (app + server)."""
+        return (*self._app_mw, *self._wire_mw)
 
     # ------------------------------------------------------------------
     # Shared helpers
@@ -428,8 +440,15 @@ class RPC(_Server):
         *,
         options: QueueOptions | Sequence[QueueOptions] | None = None,
         validate_types: bool | None = None,
+        middlewares: Sequence[AppMiddleware | WireMiddleware] | None = None,
     ) -> None:
-        super().__init__(app, path, options=options, validate_types=validate_types)
+        super().__init__(
+            app,
+            path,
+            options=options,
+            validate_types=validate_types,
+            middlewares=middlewares,
+        )
         self._handlers: dict[tuple[str, str], HandlerInfo] = {}
         self._consuming = False
 
@@ -807,8 +826,15 @@ class Worker(_Server):
         *,
         options: QueueOptions | Sequence[QueueOptions] | None = None,
         validate_types: bool | None = None,
+        middlewares: Sequence[AppMiddleware | WireMiddleware] | None = None,
     ) -> None:
-        super().__init__(app, path, options=options, validate_types=validate_types)
+        super().__init__(
+            app,
+            path,
+            options=options,
+            validate_types=validate_types,
+            middlewares=middlewares,
+        )
         self._handlers: dict[tuple[str, str], HandlerInfo] = {}
         self._consuming = False
 
@@ -1068,8 +1094,15 @@ class Bus(_Server):
         *,
         options: QueueOptions | Sequence[QueueOptions] | None = None,
         validate_types: bool | None = None,
+        middlewares: Sequence[AppMiddleware | WireMiddleware] | None = None,
     ) -> None:
-        super().__init__(app, path, options=options, validate_types=validate_types)
+        super().__init__(
+            app,
+            path,
+            options=options,
+            validate_types=validate_types,
+            middlewares=middlewares,
+        )
         self._subscribers_by_topic: dict[str, list[HandlerInfo]] = {}
         self._patterns_by_topic: dict[str, re.Pattern[str]] = {}
         self._subscription_patterns: set[str] = set()

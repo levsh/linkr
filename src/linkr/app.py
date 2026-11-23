@@ -192,14 +192,20 @@ class App:
         *,
         options: QueueOptions | Sequence[QueueOptions] | None = None,
         validate_types: bool | None = None,
+        middlewares: Sequence[AppMiddleware | WireMiddleware] | None = None,
     ) -> RPC:
         existing = self._rpc_servers.get(path)
         normalized = utils.normalize_queue_options(options)
+        normalized_mw = tuple(middlewares or ())
         if existing is not None:
-            if existing.options != normalized or existing.validate_types != validate_types:
+            if (
+                existing.options != normalized
+                or existing.validate_types != validate_types
+                or existing.own_middlewares != normalized_mw
+            ):
                 raise ValueError(f"rpc server already configured for path {path!r}")
             return existing
-        server = RPC(self, path, options=options, validate_types=validate_types)
+        server = RPC(self, path, options=options, validate_types=validate_types, middlewares=normalized_mw)
         self._rpc_servers[path] = server
         return server
 
@@ -209,14 +215,20 @@ class App:
         *,
         options: QueueOptions | Sequence[QueueOptions] | None = None,
         validate_types: bool | None = None,
+        middlewares: Sequence[AppMiddleware | WireMiddleware] | None = None,
     ) -> Worker:
         existing = self._worker_servers.get(path)
         normalized = utils.normalize_queue_options(options)
+        normalized_mw = tuple(middlewares or ())
         if existing is not None:
-            if existing.options != normalized or existing.validate_types != validate_types:
+            if (
+                existing.options != normalized
+                or existing.validate_types != validate_types
+                or existing.own_middlewares != normalized_mw
+            ):
                 raise ValueError(f"worker server already configured for path {path!r}")
             return existing
-        server = Worker(self, path, options=options, validate_types=validate_types)
+        server = Worker(self, path, options=options, validate_types=validate_types, middlewares=normalized_mw)
         self._worker_servers[path] = server
         return server
 
@@ -226,14 +238,20 @@ class App:
         *,
         options: QueueOptions | Sequence[QueueOptions] | None = None,
         validate_types: bool | None = None,
+        middlewares: Sequence[AppMiddleware | WireMiddleware] | None = None,
     ) -> Bus:
         existing = self._bus_servers.get(path)
         normalized = utils.normalize_queue_options(options)
+        normalized_mw = tuple(middlewares or ())
         if existing is not None:
-            if existing.options != normalized or existing.validate_types != validate_types:
+            if (
+                existing.options != normalized
+                or existing.validate_types != validate_types
+                or existing.own_middlewares != normalized_mw
+            ):
                 raise ValueError(f"bus server already configured for path {path!r}")
             return existing
-        server = Bus(self, path, options=options, validate_types=validate_types)
+        server = Bus(self, path, options=options, validate_types=validate_types, middlewares=normalized_mw)
         self._bus_servers[path] = server
         return server
 
@@ -245,13 +263,36 @@ class App:
         if self._closed:
             raise RuntimeError("App is closed")
         await self._backend.init()
+        initialized: set[int] = set()
         for mw in self._middlewares:
+            if id(mw) in initialized:
+                continue
+            initialized.add(id(mw))
             await mw.init()
+        for server in self.servers:
+            for mw in server.own_middlewares:
+                if id(mw) in initialized:
+                    continue
+                initialized.add(id(mw))
+                await mw.init()
 
     async def close(self, timeout: float | None = None) -> None:
         for server in self.servers:
             await server.stop_consume()
-        for mw in reversed(self._middlewares):
+        to_close: list[AppMiddleware | WireMiddleware] = []
+        seen: set[int] = set()
+        for mw in self._middlewares:
+            if id(mw) in seen:
+                continue
+            seen.add(id(mw))
+            to_close.append(mw)
+        for server in self.servers:
+            for mw in server.own_middlewares:
+                if id(mw) in seen:
+                    continue
+                seen.add(id(mw))
+                to_close.append(mw)
+        for mw in reversed(to_close):
             await mw.close()
         await self._backend.close()
         self._closed = True

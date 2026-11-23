@@ -4,6 +4,7 @@ import json
 
 from linkr import App, LocalBackend
 from linkr.contracts import describe_app, expose_describe, render_contract_html
+from linkr.middleware.gzip import GzipMiddleware
 
 
 def build_demo_app() -> App:
@@ -11,7 +12,7 @@ def build_demo_app() -> App:
     math = app.rpc("math")
     users = app.rpc("users")
     email = app.worker("email")
-    reports = app.worker("reports")
+    reports = app.worker("reports", validate_types=True, middlewares=[GzipMiddleware()])
     bus = app.bus()
 
     @math.method("add")

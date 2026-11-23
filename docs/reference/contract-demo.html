@@ -42,6 +42,7 @@ h4{margin:12px 0 6px}
 .badge-task{background:#fff7ed;color:#9a3412;border-color:#ffedd5}
 .badge-event{background:#f0fdf4;color:#166534;border-color:#dcfce7}
 .badge-queue,.badge-val,.badge-ver{background:#f2f4f7;color:#344054;border-color:#e4e7ec}
+.badge-feature{background:#ecfdf3;color:#027a48;border-color:#abefc6}
 table.params{width:100%;border-collapse:collapse;margin:8px 0}
 th,td{border-bottom:1px solid var(--border);padding:8px 6px;text-align:left;vertical-align:top}
 th{font-size:12px;color:var(--muted);text-transform:uppercase}
@@ -191,7 +192,7 @@ details.schema>summary{cursor:pointer;color:var(--accent);font-weight:600}
     ],
     &quot;additionalProperties&quot;: false
   }
-}</pre></details><p class="muted">No result (fire-and-forget).</p></article><article class="card op" id="t-demo.reports.generate" data-filter-text="demo.reports.generate demo.reports.generate demo.reports generate Generate a report asynchronously."><div class="card-head"><h3><code>demo.reports.generate</code></h3><div class="badges"><span class="badge badge-task">TASK</span><span class="badge badge-queue">queue: demo.reports</span></div></div><p>Generate a report asynchronously.</p><h4>Parameters</h4><table class="params"><thead><tr><th>Name</th><th>Kind</th><th>Required</th><th>Default</th><th>Type</th></tr></thead><tbody><tr><td><code>report_id</code></td><td>positional_or_keyword (pos 0)</td><td class="req-yes">yes</td><td><code>—</code></td><td><code>string</code></td></tr><tr><td><code>force</code></td><td>positional_or_keyword (pos 1)</td><td class="req-no">no</td><td><code>false</code></td><td><code>boolean</code></td></tr></tbody></table><details class="schema"><summary>Input schema (args / kwds)</summary><pre>{
+}</pre></details><p class="muted">No result (fire-and-forget).</p></article><article class="card op" id="t-demo.reports.generate" data-filter-text="demo.reports.generate demo.reports.generate demo.reports generate Generate a report asynchronously. gzip"><div class="card-head"><h3><code>demo.reports.generate</code></h3><div class="badges"><span class="badge badge-task">TASK</span><span class="badge badge-queue">queue: demo.reports</span><span class="badge badge-val">validate_types</span><span class="badge badge-feature">feature: gzip</span></div></div><p>Generate a report asynchronously.</p><h4>Parameters</h4><table class="params"><thead><tr><th>Name</th><th>Kind</th><th>Required</th><th>Default</th><th>Type</th></tr></thead><tbody><tr><td><code>report_id</code></td><td>positional_or_keyword (pos 0)</td><td class="req-yes">yes</td><td><code>—</code></td><td><code>string</code></td></tr><tr><td><code>force</code></td><td>positional_or_keyword (pos 1)</td><td class="req-no">no</td><td><code>false</code></td><td><code>boolean</code></td></tr></tbody></table><details class="schema"><summary>Input schema (args / kwds)</summary><pre>{
   &quot;args_schema&quot;: {
     &quot;type&quot;: &quot;array&quot;,
     &quot;prefixItems&quot;: [

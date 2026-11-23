@@ -13,7 +13,13 @@ class BaseMiddleware(ABC):
 
     Provides optional lifecycle hooks that are called by :class:`App`
     during startup and shutdown.
+
+    Class/instance attribute ``features`` declares stable feature tags
+    (e.g. ``("gzip",)``) surfaced in application contracts for handlers served
+    by servers that use this middleware.
     """
+
+    features: Sequence[str] | str | Callable[[], Sequence[str] | str] = ()
 
     async def init(self) -> None:
         """
@@ -28,6 +34,52 @@ class BaseMiddleware(ABC):
 
         Override this method to release connections, close files, etc.
         """
+
+    @classmethod
+    def declared_features(cls, middleware: BaseMiddleware | type[BaseMiddleware]) -> tuple[str, ...]:
+        """Return normalized, deduplicated contract feature tags for *middleware*."""
+        raw = middleware.features
+        if callable(raw) and not isinstance(raw, str):
+            try:
+                raw = raw()
+            except Exception:
+                raw = ()
+        if raw is None:
+            return ()
+        items: list[Any]
+        if isinstance(raw, str):
+            items = [raw]
+        else:
+            try:
+                items = list(raw)
+            except TypeError:
+                items = [raw]
+        seen: set[str] = set()
+        result: list[str] = []
+        for item in items:
+            if item is None:
+                continue
+            value = str(item).strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            result.append(value)
+        return tuple(result)
+
+
+def middleware_features(middlewares: Sequence[Any] | None) -> tuple[str, ...]:
+    """Collect normalized, deduplicated feature tags from middlewares in order."""
+    if not middlewares:
+        return ()
+    seen: set[str] = set()
+    result: list[str] = []
+    for middleware in middlewares:
+        for feature in BaseMiddleware.declared_features(middleware):
+            if feature in seen:
+                continue
+            seen.add(feature)
+            result.append(feature)
+    return tuple(result)
 
 
 class AppMiddleware(BaseMiddleware):
@@ -201,6 +253,7 @@ def wrap_app_client(
     Returns:
         Callable that executes the middleware dispatch.
     """
+
     async def call() -> Response | None:
         return await mw.dispatch_client(nxt, request, context=context)
 
@@ -227,6 +280,7 @@ def wrap_wire_client(
     Returns:
         Callable that executes the middleware dispatch.
     """
+
     async def call() -> Message | None:
         return await mw.dispatch_client(nxt, request, message, context=context)
 
@@ -249,6 +303,7 @@ def wrap_app_server(
     Returns:
         Callable that executes the middleware dispatch.
     """
+
     async def call() -> Response | None:
         return await mw.dispatch_server(nxt, request)
 
@@ -271,6 +326,7 @@ def wrap_wire_server(
     Returns:
         Callable that executes the middleware dispatch.
     """
+
     async def call() -> tuple[Message, Response] | tuple[None, None]:
         return await mw.dispatch_server(nxt, message)
 

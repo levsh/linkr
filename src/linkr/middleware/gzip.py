@@ -32,6 +32,8 @@ class GzipMiddleware(WireMiddleware):
     has been applied.
     """
 
+    features = ("gzip",)
+
     def __init__(self, min_size: int = 1024) -> None:
         """
         Args:

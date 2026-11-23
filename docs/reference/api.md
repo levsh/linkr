@@ -137,4 +137,4 @@ See [Configuration](configuration.md) and [Hooks events](hooks-events.md) for de
 - `ContractBuilder(...).build()`, `HtmlContractRenderer(...)`, `render_contract_html(...)` (`linkr.contracts`).
 - `App.subscriptions` / `App.methods` / `App.tasks` — aggregated views across servers.
 
-Contract entries include fully qualified call/send targets, queue names, input/output schema fragments (when available), and `validate_types` flags. `Depends[...]` parameters are excluded from public input contracts.
+Contract entries include fully qualified call/send targets, queue names, middleware `features`, input/output schema fragments (when available), and `validate_types` flags. Event subscriber entries also include `features`. `Depends[...]` parameters are excluded from public input contracts.

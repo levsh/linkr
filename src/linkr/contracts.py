@@ -11,6 +11,7 @@ from typing import Annotated, Any, Literal, get_type_hints
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 from pydantic.json_schema import GenerateJsonSchema
 
+from .middleware import middleware_features
 from .models import HandlerInfo
 
 CONTRACT_VERSION = "linkr/1.0-alpha"
@@ -56,6 +57,7 @@ class _BaseMethodContract(BaseModel):
     name: str
     queue: str
     description: str | None = None
+    features: list[str] = Field(default_factory=list)
     input: HandlerInputContract = Field(default_factory=HandlerInputContract)
     validate_types: bool = False
 
@@ -96,6 +98,7 @@ class EventSubscriberContract(BaseModel):
     queue_template: str
     handler: str
     description: str | None = None
+    features: list[str] = Field(default_factory=list)
     payload: EventPayloadContract = Field(default_factory=EventPayloadContract)
     validate_types: bool = False
 
@@ -153,6 +156,7 @@ class AppContract(BaseModel):
                 "name": method.name,
                 "queue": method.queue,
                 "description": method.description,
+                "features": list(method.features),
                 "input": {
                     "params": [dump_param(p) for p in method.input.params],
                     "args_schema": method.input.args_schema,
@@ -177,6 +181,7 @@ class AppContract(BaseModel):
                         "queue_template": sub.queue_template,
                         "handler": sub.handler,
                         "description": sub.description,
+                        "features": list(sub.features),
                         "payload": {
                             "params": [dump_param(p) for p in sub.payload.params],
                             "kwds_schema": sub.payload.kwds_schema,
@@ -232,35 +237,45 @@ class ContractBuilder:
         contract.components = ComponentsContract(schemas=self._components)
         return contract
 
+    def _server_features(self, server: Any) -> list[str]:
+        return list(middleware_features(server.middlewares))
+
     def _build_methods(self) -> dict[str, RpcMethodContract]:
         methods: dict[str, RpcMethodContract] = {}
-        for (queue, leaf), info in sorted(self._iter_rpc_handlers(), key=lambda item: (item[0][0], item[0][1])):
+        for (queue, leaf), info, server in sorted(self._iter_rpc_handlers(), key=lambda item: (item[0][0], item[0][1])):
             fq_name = f"{queue}.{leaf}"
             if not self._include_internal and self._is_internal_name(fq_name):
                 continue
-            methods[fq_name] = self._build_rpc_handler(info, fq_name=fq_name, queue=queue)
+            methods[fq_name] = self._build_rpc_handler(
+                info, fq_name=fq_name, queue=queue, features=self._server_features(server)
+            )
         return methods
 
     def _build_tasks(self) -> dict[str, TaskMethodContract]:
         tasks: dict[str, TaskMethodContract] = {}
-        for (queue, leaf), info in sorted(self._iter_task_handlers(), key=lambda item: (item[0][0], item[0][1])):
+        for (queue, leaf), info, server in sorted(
+            self._iter_task_handlers(), key=lambda item: (item[0][0], item[0][1])
+        ):
             fq_name = f"{queue}.{leaf}"
             if not self._include_internal and self._is_internal_name(fq_name):
                 continue
-            tasks[fq_name] = self._build_task_handler(info, fq_name=fq_name, queue=queue)
+            tasks[fq_name] = self._build_task_handler(
+                info, fq_name=fq_name, queue=queue, features=self._server_features(server)
+            )
         return tasks
 
     def _build_events(self) -> dict[str, EventContract]:
         events: dict[str, EventContract] = {}
-        grouped: dict[str, list[tuple[HandlerInfo, str]]] = {}
+        grouped: dict[str, list[tuple[HandlerInfo, str, list[str]]]] = {}
         for server in self._iter_bus_servers():
             queue_template = f"{server.queue_base}.<instance_id>"
+            features = self._server_features(server)
             for topic, infos in server.subscriptions.items():
                 for info in infos:
-                    grouped.setdefault(topic, []).append((info, queue_template))
+                    grouped.setdefault(topic, []).append((info, queue_template, list(features)))
         for topic in sorted(grouped):
             subscribers: list[EventSubscriberContract] = []
-            for info, queue_template in grouped[topic]:
+            for info, queue_template, features in grouped[topic]:
                 fn = inspect.unwrap(info.fn)
                 params, _args_schema, kwds_schema = self._build_input(info, fn, is_event=True)
                 subscribers.append(
@@ -268,6 +283,7 @@ class ContractBuilder:
                         queue_template=queue_template,
                         handler=getattr(info.fn, "__name__", info.name),
                         description=inspect.getdoc(fn),
+                        features=list(features),
                         payload=EventPayloadContract(params=params, kwds_schema=kwds_schema),
                         validate_types=bool(getattr(info, "validate_args", False)),
                     )
@@ -275,7 +291,9 @@ class ContractBuilder:
             events[topic] = EventContract(topic=topic, subscribers=subscribers)
         return events
 
-    def _build_rpc_handler(self, info: HandlerInfo, *, fq_name: str, queue: str) -> RpcMethodContract:
+    def _build_rpc_handler(
+        self, info: HandlerInfo, *, fq_name: str, queue: str, features: list[str] | None = None
+    ) -> RpcMethodContract:
         fn = inspect.unwrap(info.fn)
         params, args_schema, kwds_schema = self._build_input(info, fn, is_event=False)
         return RpcMethodContract(
@@ -283,12 +301,15 @@ class ContractBuilder:
             queue=queue,
             call=fq_name,
             description=inspect.getdoc(fn),
+            features=list(features or []),
             input=HandlerInputContract(params=params, args_schema=args_schema, kwds_schema=kwds_schema),
             output=HandlerOutputContract(json_schema=self._build_output_schema(fn)),
             validate_types=bool(getattr(info, "validate_args", False)),
         )
 
-    def _build_task_handler(self, info: HandlerInfo, *, fq_name: str, queue: str) -> TaskMethodContract:
+    def _build_task_handler(
+        self, info: HandlerInfo, *, fq_name: str, queue: str, features: list[str] | None = None
+    ) -> TaskMethodContract:
         fn = inspect.unwrap(info.fn)
         params, args_schema, kwds_schema = self._build_input(info, fn, is_event=False)
         return TaskMethodContract(
@@ -296,6 +317,7 @@ class ContractBuilder:
             queue=queue,
             send=fq_name,
             description=inspect.getdoc(fn),
+            features=list(features or []),
             input=HandlerInputContract(params=params, args_schema=args_schema, kwds_schema=kwds_schema),
             output=None,
             validate_types=bool(getattr(info, "validate_args", False)),
@@ -478,36 +500,36 @@ class ContractBuilder:
             return list(servers.values())
         return list(servers)
 
-    def _iter_rpc_handlers(self) -> list[tuple[tuple[str, str], HandlerInfo]]:
-        items: list[tuple[tuple[str, str], HandlerInfo]] = []
+    def _iter_rpc_handlers(self) -> list[tuple[tuple[str, str], HandlerInfo, Any]]:
+        items: list[tuple[tuple[str, str], HandlerInfo, Any]] = []
         rpc_servers = getattr(self._app, "_rpc_servers", None)
         if rpc_servers and isinstance(rpc_servers, dict):
             for server in rpc_servers.values():
                 handlers = getattr(server, "_handlers", None)
                 if handlers:
-                    items.extend(handlers.items())
+                    items.extend((key, info, server) for key, info in handlers.items())
             return items
         # fallback old API
         for server in self._iter_servers():
             handlers = getattr(server, "_rpc_handlers", None)
             if handlers is not None:
-                items.extend(handlers.items())
+                items.extend((key, info, server) for key, info in handlers.items())
         return items
 
-    def _iter_task_handlers(self) -> list[tuple[tuple[str, str], HandlerInfo]]:
-        items: list[tuple[tuple[str, str], HandlerInfo]] = []
+    def _iter_task_handlers(self) -> list[tuple[tuple[str, str], HandlerInfo, Any]]:
+        items: list[tuple[tuple[str, str], HandlerInfo, Any]] = []
         worker_servers = getattr(self._app, "_worker_servers", None)
         if worker_servers and isinstance(worker_servers, dict):
             for server in worker_servers.values():
                 handlers = getattr(server, "_handlers", None)
                 if handlers:
-                    items.extend(handlers.items())
+                    items.extend((key, info, server) for key, info in handlers.items())
             return items
         # fallback old API
         for server in self._iter_servers():
             handlers = getattr(server, "_task_handlers", None)
             if handlers is not None:
-                items.extend(handlers.items())
+                items.extend((key, info, server) for key, info in handlers.items())
         return items
 
     def _iter_bus_servers(self) -> list[Any]:
@@ -769,12 +791,23 @@ class HtmlContractRenderer:
             output_contract = op.get("output")
             description = op.get("description")
             address = op.get("call") or op.get("send") or fq_name
+            features = op.get("features") or []
             filter_text = " ".join(
-                str(part) for part in [fq_name, address, op.get("queue"), op.get("name"), description or ""]
+                str(part)
+                for part in [
+                    fq_name,
+                    address,
+                    op.get("queue"),
+                    op.get("name"),
+                    description or "",
+                    *features,
+                ]
             )
             badges = [(kind.upper(), kind), (f"queue: {op.get('queue')}", "queue")]
             if op.get("validate_types"):
                 badges.append(("validate_types", "val"))
+            for feature in features:
+                badges.append((f"feature: {feature}", "feature"))
             schema_details = self._details(
                 "Input schema (args / kwds)",
                 {"args_schema": input_contract.get("args_schema"), "kwds_schema": input_contract.get("kwds_schema")},
@@ -807,9 +840,12 @@ class HtmlContractRenderer:
             subscribers_html = []
             for subscriber in event.get("subscribers") or []:
                 payload = subscriber.get("payload") or {}
+                features = subscriber.get("features") or []
                 badges = [(f"queue: {subscriber.get('queue_template')}", "queue")]
                 if subscriber.get("validate_types"):
                     badges.append(("validate_types", "val"))
+                for feature in features:
+                    badges.append((f"feature: {feature}", "feature"))
                 description = subscriber.get("description")
                 subscribers_html.append(
                     '<div class="subscriber">'
@@ -823,16 +859,16 @@ class HtmlContractRenderer:
                     + "</div>"
                 )
             filter_text = " ".join(
-                [str(topic)] + [str(sub.get("handler", "")) for sub in event.get("subscribers") or []]
+                [str(topic)]
+                + [str(sub.get("handler", "")) for sub in event.get("subscribers") or []]
+                + [str(f) for sub in event.get("subscribers") or [] for f in (sub.get("features") or [])]
             )
             cards.append(
                 f'<article class="card op" id="{self._e("e-" + topic)}" data-filter-text="{self._e(filter_text)}">'
                 '<div class="card-head">'
                 f"<h3><code>{self._e(topic)}</code></h3>"
                 f'<div class="badges">{self._badges(("EVENT", "event"))}</div>'
-                "</div>"
-                + ("".join(subscribers_html) or '<p class="muted">No subscribers.</p>')
-                + "</article>"
+                "</div>" + ("".join(subscribers_html) or '<p class="muted">No subscribers.</p>') + "</article>"
             )
         return f'<section><h2>Events</h2>{"".join(cards)}</section>'
 
@@ -884,6 +920,7 @@ h4{{margin:12px 0 6px}}
 .badge-task{{background:#fff7ed;color:#9a3412;border-color:#ffedd5}}
 .badge-event{{background:#f0fdf4;color:#166534;border-color:#dcfce7}}
 .badge-queue,.badge-val,.badge-ver{{background:#f2f4f7;color:#344054;border-color:#e4e7ec}}
+.badge-feature{{background:#ecfdf3;color:#027a48;border-color:#abefc6}}
 table.params{{width:100%;border-collapse:collapse;margin:8px 0}}
 th,td{{border-bottom:1px solid var(--border);padding:8px 6px;text-align:left;vertical-align:top}}
 th{{font-size:12px;color:var(--muted);text-transform:uppercase}}
