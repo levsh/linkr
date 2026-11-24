@@ -53,8 +53,13 @@ class _FakeChannel:
 
 
 class _FakeProcessContext:
+    def __init__(self, incoming: _FakeIncomingMessage, **kwargs: Any) -> None:
+        self.incoming = incoming
+        self.kwargs = kwargs
+
     async def __aenter__(self):
-        return None
+        self.incoming.process_calls.append(dict(self.kwargs))
+        return self.incoming
 
     async def __aexit__(self, exc_type, exc, tb):
         return False
@@ -73,9 +78,20 @@ class _FakeIncomingMessage:
         self.correlation_id = correlation_id
         self.reply_to = reply_to
         self.headers = headers or {}
+        self.process_calls: list[dict[str, Any]] = []
+        self.acked = False
 
-    def process(self):
-        return _FakeProcessContext()
+    def process(self, **kwargs: Any):
+        return _FakeProcessContext(self, **kwargs)
+
+    async def ack(self):
+        self.acked = True
+
+    async def reject(self, requeue: bool = True):
+        self.rejected = requeue
+
+    async def nack(self, requeue: bool = True, multiple: bool = False):
+        self.nacked = (requeue, multiple)
 
 
 def _wire_backend() -> tuple[RmqBackend, _FakeChannel, dict[str, _FakeExchange], _FakeCallbackQueue]:
@@ -596,6 +612,105 @@ class TestRmqBackend:
             details={"connection": "error"},
         )
         assert channel.declare_queue_calls == []
+
+    async def test_ack_mode_after_reply_acks_after_handler(self):
+        backend, _channel, _exchanges, _callback = _wire_backend()
+        events: list[str] = []
+
+        async def handler(message: Message) -> None:
+            assert incoming.acked is False
+            events.append("handler")
+
+        incoming = _FakeIncomingMessage(body=b'{"value": 1}', headers={})
+
+        await backend._on_task_message(incoming, handler, ack_mode="after_reply")  # type: ignore[arg-type]
+
+        assert events == ["handler"]
+        assert incoming.acked is True
+        assert getattr(incoming, "rejected", None) is None
+
+    async def test_ack_mode_after_handler_acks_after_handler(self):
+        backend, _channel, _exchanges, _callback = _wire_backend()
+        events: list[str] = []
+
+        async def handler(message: Message) -> None:
+            assert incoming.acked is False
+            events.append("handler")
+
+        incoming = _FakeIncomingMessage(body=b'{"value": 1}', headers={})
+
+        await backend._on_task_message(incoming, handler, ack_mode="after_handler")  # type: ignore[arg-type]
+
+        assert events == ["handler"]
+        assert incoming.acked is True
+
+    async def test_ack_mode_before_handler_acks_before_handler(self):
+        backend, _channel, _exchanges, _callback = _wire_backend()
+        events: list[str] = []
+
+        async def handler(message: Message) -> None:
+            assert incoming.acked is True
+            events.append("handler")
+
+        incoming = _FakeIncomingMessage(body=b'{"value": 1}', headers={})
+
+        await backend._on_task_message(incoming, handler, ack_mode="before_handler")  # type: ignore[arg-type]
+
+        assert events == ["handler"]
+        assert incoming.acked is True
+
+    async def test_ack_mode_before_handler_swallows_handler_exception(self):
+        backend, _channel, _exchanges, _callback = _wire_backend()
+
+        async def handler(message: Message) -> None:
+            raise RuntimeError("boom")
+
+        incoming = _FakeIncomingMessage(body=b'{"value": 1}', headers={})
+
+        await backend._on_task_message(incoming, handler, ack_mode="before_handler")  # type: ignore[arg-type]
+
+        assert incoming.acked is True
+        assert getattr(incoming, "rejected", None) is None
+
+    async def test_ack_mode_after_reply_rejects_handler_exception(self):
+        backend, _channel, _exchanges, _callback = _wire_backend()
+
+        async def handler(message: Message) -> None:
+            raise RuntimeError("boom")
+
+        incoming = _FakeIncomingMessage(body=b'{"value": 1}', headers={})
+
+        await backend._on_task_message(incoming, handler, ack_mode="after_reply")  # type: ignore[arg-type]
+
+        assert incoming.acked is False
+        assert getattr(incoming, "rejected", None) is False
+
+    async def test_ack_mode_rejects_unconvertible_message(self):
+        backend, _channel, _exchanges, _callback = _wire_backend()
+        events: list[str] = []
+
+        async def handler(message: Message) -> None:
+            events.append("handler")
+
+        class BadIncoming(_FakeIncomingMessage):
+            def __init__(self) -> None:
+                self.correlation_id = None
+                self.reply_to = None
+                self.headers = {}
+                self.process_calls: list[dict[str, Any]] = []
+                self.acked = False
+
+            @property
+            def body(self) -> bytes:  # type: ignore[override]
+                raise RuntimeError("bad body")
+
+        bad = BadIncoming()
+
+        await backend._on_task_message(bad, handler, ack_mode="after_reply")  # type: ignore[arg-type]
+
+        assert events == []
+        assert getattr(bad, "rejected", None) is False
+        assert bad.acked is False
 
     async def test_healthcheck_checks_active_queues_in_parallel(self):
         backend, channel, _exchanges, _callback = _wire_backend()

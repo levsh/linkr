@@ -246,7 +246,7 @@ await app.init()
 await rpc.consume()
 ```
 
-Options are opaque to `App`; the active backend selects the types it understands. `LocalBackend` ignores transport options.
+Options are opaque to `App`; the active backend selects the types it understands. `LocalBackend` ignores transport options. `RmqQueueOptions` also supports `ack_mode`: `after_reply` (default) ack after successful processing and, for RPC, after successful reply publish; for task/event it is equivalent to `after_handler`. `after_handler` acks after successful handler execution. `before_handler` acks before handler execution.
 
 ## Hooks and middleware
 

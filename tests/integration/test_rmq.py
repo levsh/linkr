@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 from linkr import App, ErrorCode, HealthStatus, RPCError
-from linkr.backends.rmq import RmqBackend
+from linkr.backends.rmq import RmqBackend, RmqQueueOptions
 from tests.helpers import call, emit, send
 from tests.utils import get_ip
 
@@ -290,3 +290,41 @@ class TestRmqBackend:
             )
 
         assert await app.healthcheck() == HealthStatus(ready=False, health=None)
+
+    async def test_ack_mode_before_handler_drops_task_on_failure(self, rabbitmq):
+        app = App(uid("ack_before"), backend=make_backend(rabbitmq))
+        worker = app.worker("jobs", options=[RmqQueueOptions(ack_mode="before_handler")])
+        client = App(uid("client"), backend=make_backend(rabbitmq))
+        attempts = 0
+
+        @worker.task("fail_once")
+        async def fail_once() -> None:
+            nonlocal attempts
+            attempts += 1
+            raise RuntimeError("boom")
+
+        async with app, client:
+            await worker.consume()
+            await send(client, f"{app.name}.jobs.fail_once")
+            await asyncio.sleep(1.5)
+
+        assert attempts == 1
+
+    async def test_ack_mode_after_reply_rejects_task_on_failure(self, rabbitmq):
+        app = App(uid("ack_after"), backend=make_backend(rabbitmq))
+        worker = app.worker("jobs", options=[RmqQueueOptions(ack_mode="after_reply")])
+        client = App(uid("client"), backend=make_backend(rabbitmq))
+        attempts = 0
+
+        @worker.task("fail_once")
+        async def fail_once() -> None:
+            nonlocal attempts
+            attempts += 1
+            raise RuntimeError("boom")
+
+        async with app, client:
+            await worker.consume()
+            await send(client, f"{app.name}.jobs.fail_once")
+            await asyncio.sleep(1.5)
+
+        assert attempts == 1

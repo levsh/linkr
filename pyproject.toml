@@ -49,6 +49,9 @@ optional = true
 [tool.poetry.group.docs.dependencies]
 zensical = "*"
 
+[tool.poetry.group.dev.dependencies]
+pylint = "^4.1.4"
+
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"

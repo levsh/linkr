@@ -6,7 +6,7 @@ import ssl
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 import aio_pika
@@ -40,6 +40,11 @@ class RmqQueueOptions(QueueOptions):
         passive: Declare queue passively (do not create). ``None`` omits.
         arguments: Additional queue declaration arguments (e.g. ``x-max-length``).
         prefetch_count: Consumer prefetch count. ``None`` omits (unlimited).
+        ack_mode: When to acknowledge messages. ``after_reply`` acknowledges
+            after successful processing and, for RPC, after successful reply
+            publish; for task/event it is equivalent to ``after_handler``.
+            ``after_handler`` acknowledges after successful handler execution.
+            ``before_handler`` acknowledges before handler execution.
         extra: Reserved for future backend-specific options.
     """
 
@@ -49,6 +54,7 @@ class RmqQueueOptions(QueueOptions):
     passive: bool | None = None
     arguments: dict[str, Any] | None = None
     prefetch_count: int | None = None
+    ack_mode: Literal["before_handler", "after_handler", "after_reply"] = "after_reply"
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -566,7 +572,11 @@ class RmqBackend(Backend):
                 await rmq_queue.bind(exchange, routing_key=queue_name)
 
                 async def _rpc_handler(incoming: AbstractIncomingMessage) -> None:
-                    await self._on_rpc_message(incoming, handler)
+                    await self._on_rpc_message(
+                        incoming,
+                        handler,
+                        ack_mode=selected.ack_mode if selected else "after_reply",
+                    )
 
                 consumer_tag = await rmq_queue.consume(_rpc_handler)
                 self._consumers.setdefault("rpc", {})[queue] = (channel, rmq_queue, consumer_tag)
@@ -583,33 +593,89 @@ class RmqBackend(Backend):
                         logger.exception("Failed to close dedicated RPC channel for queue %s", queue)
                 raise
 
+    @staticmethod
+    async def _ack(incoming: AbstractIncomingMessage, mode: str) -> bool:
+        try:
+            await incoming.ack()
+        except Exception:
+            logger.exception("Failed to ack %s message", mode)
+            return False
+        return True
+
+    @staticmethod
+    async def _reject(incoming: AbstractIncomingMessage, mode: str) -> bool:
+        try:
+            await incoming.reject(requeue=False)
+        except Exception:
+            logger.exception("Failed to reject %s message", mode)
+            return False
+        return True
+
     async def _on_rpc_message(
         self,
         incoming: AbstractIncomingMessage,
         handler: Handler,
+        *,
+        ack_mode: Literal["before_handler", "after_handler", "after_reply"] = "after_reply",
     ) -> None:
-        async with incoming.process():
+        try:
             linkr_message = self._to_linkr_message(incoming)
+        except Exception:
+            logger.exception("Failed to convert RPC message, dropping")
+            await self._reject(incoming, "rpc")
+            return
+
+        if ack_mode == "before_handler" and not await self._ack(incoming, "rpc"):
+            return
+
+        try:
             response_message = await handler(linkr_message)
+        except Exception:
+            logger.exception("RPC handler failed")
+            if ack_mode != "before_handler":
+                await self._reject(incoming, "rpc")
+            return
 
-            if response_message is not None and incoming.reply_to and self._channel is not None:
-                rttl = response_message.headers.get("rttl")
-                expiration: timedelta | None = None
-                if rttl is not None:
-                    expiration = timedelta(seconds=float(rttl))
+        if ack_mode == "after_handler":
+            await self._ack(incoming, "rpc")
 
-                await self._channel.default_exchange.publish(
-                    RobustMessage(
-                        body=response_message.data,
-                        headers=response_message.headers,
-                        correlation_id=incoming.correlation_id,
-                        content_type=response_message.headers.get("content_type"),
-                        content_encoding=response_message.headers.get("content_encoding"),
-                        delivery_mode=DeliveryMode.PERSISTENT,
-                        expiration=expiration,
-                    ),
-                    routing_key=incoming.reply_to,
-                )
+        publish_error = None
+        if response_message is not None and incoming.reply_to and self._channel is not None:
+            try:
+                await self._publish_rpc_response(incoming, response_message)
+            except Exception as exc:
+                logger.exception("Failed to publish RPC response")
+                publish_error = exc
+
+        if ack_mode == "after_reply":
+            if publish_error is None:
+                await self._ack(incoming, "rpc")
+            else:
+                await self._reject(incoming, "rpc")
+        elif publish_error is not None and ack_mode == "before_handler":
+            # Message already acked; reply is lost.
+            pass
+
+    async def _publish_rpc_response(self, incoming: AbstractIncomingMessage, response_message: LinkrMessage) -> None:
+        if self._channel is None or incoming.reply_to is None:
+            return
+        rttl = response_message.headers.get("rttl")
+        expiration: timedelta | None = None
+        if rttl is not None:
+            expiration = timedelta(seconds=float(rttl))
+
+        await self._channel.default_exchange.publish(
+            RobustMessage(
+                body=response_message.data,
+                headers=response_message.headers,
+                correlation_id=incoming.correlation_id,
+                content_type=response_message.headers.get("content_type"),
+                content_encoding=response_message.headers.get("content_encoding"),
+                delivery_mode=DeliveryMode.PERSISTENT,
+                expiration=expiration,
+            ),
+            routing_key=incoming.reply_to,
+        )
 
     async def request(
         self,
@@ -721,7 +787,11 @@ class RmqBackend(Backend):
                 await rmq_queue.bind(exchange, routing_key=queue_name)
 
                 async def _task_handler(incoming: AbstractIncomingMessage) -> None:
-                    await self._on_task_message(incoming, handler)
+                    await self._on_task_message(
+                        incoming,
+                        handler,
+                        ack_mode=selected.ack_mode if selected else "after_reply",
+                    )
 
                 consumer_tag = await rmq_queue.consume(_task_handler)
                 self._consumers.setdefault("task", {})[queue] = (channel, rmq_queue, consumer_tag)
@@ -742,10 +812,29 @@ class RmqBackend(Backend):
         self,
         incoming: AbstractIncomingMessage,
         handler: Handler,
+        *,
+        ack_mode: Literal["before_handler", "after_handler", "after_reply"] = "after_reply",
     ) -> None:
-        async with incoming.process():
+        try:
             linkr_message = self._to_linkr_message(incoming)
+        except Exception:
+            logger.exception("Failed to convert task message, dropping")
+            await self._reject(incoming, "task")
+            return
+
+        if ack_mode == "before_handler" and not await self._ack(incoming, "task"):
+            return
+
+        try:
             await handler(linkr_message)
+        except Exception:
+            logger.exception("Task handler failed")
+            if ack_mode != "before_handler":
+                await self._reject(incoming, "task")
+            return
+
+        if ack_mode != "before_handler":
+            await self._ack(incoming, "task")
 
     async def send(
         self,
@@ -812,7 +901,11 @@ class RmqBackend(Backend):
                     await rmq_queue.bind(exchange, routing_key=topic)
 
                 async def _event_handler(incoming: AbstractIncomingMessage) -> None:
-                    await self._on_event_message(incoming, handler)
+                    await self._on_event_message(
+                        incoming,
+                        handler,
+                        ack_mode=selected.ack_mode if selected else "after_reply",
+                    )
 
                 consumer_tag = await rmq_queue.consume(_event_handler)
                 self._consumers.setdefault("event", {})[queue] = (channel, rmq_queue, consumer_tag)
@@ -846,10 +939,29 @@ class RmqBackend(Backend):
         self,
         incoming: AbstractIncomingMessage,
         handler: Handler,
+        *,
+        ack_mode: Literal["before_handler", "after_handler", "after_reply"] = "after_reply",
     ) -> None:
-        async with incoming.process():
+        try:
             linkr_message = self._to_linkr_message(incoming)
+        except Exception:
+            logger.exception("Failed to convert event message, dropping")
+            await self._reject(incoming, "event")
+            return
+
+        if ack_mode == "before_handler" and not await self._ack(incoming, "event"):
+            return
+
+        try:
             await handler(linkr_message)
+        except Exception:
+            logger.exception("Event handler failed")
+            if ack_mode != "before_handler":
+                await self._reject(incoming, "event")
+            return
+
+        if ack_mode != "before_handler":
+            await self._ack(incoming, "event")
 
     async def emit(
         self,

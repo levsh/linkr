@@ -98,7 +98,7 @@ Method/task `name` must be a local leaf (no `.`). Common handler option: `valida
 - `HandlerInfo` — registered handler metadata
 - `HealthStatus(ready: bool, health: bool | None, details: Mapping[str, Any] | None = None)` — frozen readiness/health status; `health` is `None` when `ready` is `False`; `details` is normalized to a read-only mapping with public `connection/queues` diagnostics
 - `QueueOptions` — marker base for backend-specific queue/consumer options
-- `RmqQueueOptions(...)` (`linkr.backends.rmq`) — RabbitMQ queue/consumer options (`durable`, `exclusive`, `auto_delete`, `passive`, `arguments`, `prefetch_count`, `extra`)
+- `RmqQueueOptions(...)` (`linkr.backends.rmq`) — RabbitMQ queue/consumer options (`durable`, `exclusive`, `auto_delete`, `passive`, `arguments`, `prefetch_count`, `ack_mode`, `extra`). `ack_mode="after_reply"` (default) acknowledges after successful processing and, for RPC, after successful reply publish; for task/event it is equivalent to `after_handler`. `ack_mode="after_handler"` acknowledges after successful handler execution. `ack_mode="before_handler"` acknowledges before handler execution.
 
 ## Serialization
 
