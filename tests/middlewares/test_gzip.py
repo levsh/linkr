@@ -7,7 +7,7 @@ from linkr.middleware.gzip import GzipMiddleware
 from linkr.models import Message, Request, Response
 
 
-def make_request() -> Request:
+def make_rpc_request() -> Request:
     return Request(type="rpc", data={"method": "test", "args": (), "kwds": {}})
 
 
@@ -20,7 +20,7 @@ class TestGzipMiddleware:
     async def test_small_request_not_compressed(self):
         mw = GzipMiddleware()
         raw = Message(data=self.SMALL, headers={})
-        request = make_request()
+        request = make_rpc_request()
 
         async def call_next() -> Message | None:
             return Message(data=b"ok", headers={})
@@ -32,7 +32,7 @@ class TestGzipMiddleware:
     async def test_large_request_compressed(self):
         mw = GzipMiddleware()
         raw = Message(data=self.LARGE, headers={})
-        request = make_request()
+        request = make_rpc_request()
 
         async def call_next() -> Message | None:
             return Message(data=b"ok", headers={})
@@ -45,7 +45,7 @@ class TestGzipMiddleware:
     async def test_client_decompresses_response(self):
         mw = GzipMiddleware()
         raw = Message(data=b"tiny", headers={})
-        request = make_request()
+        request = make_rpc_request()
         compressed = gzip.compress(self.LARGE)
 
         async def call_next() -> Message | None:
@@ -59,7 +59,7 @@ class TestGzipMiddleware:
         mw = GzipMiddleware()
         compressed = gzip.compress(self.LARGE)
         raw = Message(data=compressed, headers={"content_encoding": "gzip"})
-        response = Response(id=make_request().id, type="result", data={"result": "ok"})
+        response = Response(id=make_rpc_request().id, type="result", data={"result": "ok"})
 
         async def call_next() -> tuple[Message, Response] | tuple[None, None]:
             return Message(data=b"ok", headers={}), response
@@ -72,7 +72,7 @@ class TestGzipMiddleware:
         mw = GzipMiddleware()
         raw = Message(data=b"small", headers={})
         large_data = b"y" * 2000
-        response = Response(id=make_request().id, type="result", data={"result": "large"})
+        response = Response(id=make_rpc_request().id, type="result", data={"result": "large"})
 
         async def call_next() -> tuple[Message, Response] | tuple[None, None]:
             return Message(data=large_data, headers={}), response
@@ -96,7 +96,7 @@ class TestGzipMiddleware:
     async def test_custom_min_size(self):
         mw = GzipMiddleware(min_size=1)
         raw = Message(data=b"x", headers={})
-        request = make_request()
+        request = make_rpc_request()
 
         async def call_next() -> Message | None:
             return Message(data=b"ok", headers={})
@@ -108,7 +108,7 @@ class TestGzipMiddleware:
     async def test_existing_content_encoding_merged(self):
         mw = GzipMiddleware()
         raw = Message(data=self.LARGE, headers={"content_encoding": "custom"})
-        request = make_request()
+        request = make_rpc_request()
 
         async def call_next() -> Message | None:
             return Message(data=b"ok", headers={})
@@ -122,7 +122,7 @@ class TestGzipMiddleware:
         mw = GzipMiddleware()
         large_data = b"z" * 2000
         raw = Message(data=b"small", headers={})
-        response = Response(id=make_request().id, type="result", data={"result": "large"})
+        response = Response(id=make_rpc_request().id, type="result", data={"result": "large"})
 
         async def call_next() -> tuple[Message, Response] | tuple[None, None]:
             return Message(data=large_data, headers={"content_encoding": "custom"}), response

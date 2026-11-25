@@ -454,12 +454,12 @@ class TestHandlerMiddleware:
         rpc = app.rpc()
 
         @rpc.method("ping", validate_types=True)
-        def ping() -> str:
-            return "pong"
+        def ping(x: int) -> int:
+            return x
 
         async with app:
             await rpc.consume()
-            assert await call(app, "app.ping") == "pong"
+            assert await call(app, "app.ping", 1) == 1
 
         assert len(seen) == 1
         ctx = seen[0]
@@ -467,8 +467,8 @@ class TestHandlerMiddleware:
         assert ctx.name == "app.ping"
         assert ctx.request_type == "rpc"
         assert ctx.queue == "app"
-        assert ctx.validate_args is False
         assert dict(ctx.options) == {"validate_types": True}
+        assert not hasattr(ctx, "validate_args")
 
     async def test_dispatch_handler_runs_after_before_handler_hook(self):
         events: list[str] = []
@@ -530,7 +530,7 @@ class TestHandlerMiddleware:
     async def test_dispatch_handler_context_is_read_only(self):
         class MutateMw(AppMiddleware):
             async def dispatch_handler(self, call_next, request, handler_ctx):
-                with pytest.raises(Exception):
+                with pytest.raises(TypeError):
                     handler_ctx.options["x"] = 1  # type: ignore[index]
                 return await call_next()
 

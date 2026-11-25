@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from linkr import App, LocalBackend, RegistrationAlreadyExistsError, RegistrationNotFoundError
+from linkr import App, ErrorCode, LocalBackend, RPCError, RegistrationAlreadyExistsError, RegistrationNotFoundError
 from tests.helpers import call, emit, send
 
 
@@ -47,8 +47,9 @@ class TestDynamicRpcRegistration:
         assert await call(app, "app.ping") == "pong"
         await rpc.remove_method("ping")
 
-        with pytest.raises(Exception):
+        with pytest.raises(RPCError) as exc_info:
             await call(app, "app.ping")
+        assert exc_info.value.error_code == ErrorCode.METHOD_NOT_FOUND
 
     async def test_remove_method_not_found(self, app: App, rpc):
         with pytest.raises(RegistrationNotFoundError) as exc_info:
