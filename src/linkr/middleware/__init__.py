@@ -4,7 +4,7 @@ from abc import ABC
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, TypeVar
 
-from ..models import Message, Request, Response
+from ..models import HandlerContext, Message, Request, Response
 
 
 class BaseMiddleware(ABC):
@@ -137,6 +137,29 @@ class AppMiddleware(BaseMiddleware):
 
         Returns:
             The response, or ``None`` if no response is sent.
+        """
+        return await call_next()
+
+    async def dispatch_handler(
+        self,
+        call_next: Callable[[], Awaitable[Any]],
+        request: Request,
+        handler_ctx: HandlerContext,
+    ) -> Any:
+        """
+        Wrap a resolved handler call.
+
+        Override this method to perform actions before and/or after the
+        concrete handler runs. Call ``await call_next()`` to invoke the
+        next layer.
+
+        Args:
+            call_next: The next layer in the middleware chain.
+            request: The deserialised incoming request.
+            handler_ctx: Read-only handler metadata.
+
+        Returns:
+            The handler result.
         """
         return await call_next()
 
@@ -306,6 +329,31 @@ def wrap_app_server(
 
     async def call() -> Response | None:
         return await mw.dispatch_server(nxt, request)
+
+    return call
+
+
+def wrap_app_handler(
+    mw: AppMiddleware,
+    nxt: Next[Any],
+    request: Request,
+    handler_ctx: HandlerContext,
+) -> Next[Any]:
+    """
+    Wrap a handler execution step with an app-level handler middleware dispatch.
+
+    Args:
+        mw: App-level middleware instance.
+        nxt: Next callable in the pipeline.
+        request: Incoming request object.
+        handler_ctx: Read-only handler metadata.
+
+    Returns:
+        Callable that executes the middleware dispatch.
+    """
+
+    async def call() -> Any:
+        return await mw.dispatch_handler(nxt, request, handler_ctx)
 
     return call
 

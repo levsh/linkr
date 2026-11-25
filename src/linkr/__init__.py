@@ -30,6 +30,7 @@ from linkr.hooks import (
 from linkr.middleware import AppMiddleware, BaseMiddleware, WireMiddleware
 from linkr.models import (
     ErrorInfo,
+    HandlerContext,
     HandlerInfo,
     HealthStatus,
     Message,
@@ -50,6 +51,7 @@ __all__ = [
     "Depends",
     "ErrorCode",
     "ErrorInfo",
+    "HandlerContext",
     "HandlerInfo",
     "HealthStatus",
     "LinkrError",

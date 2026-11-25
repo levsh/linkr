@@ -9,6 +9,7 @@ from linkr import (
     AppMiddleware,
     Depends,
     ErrorCode,
+    HandlerContext,
     HealthStatus,
     JsonSerializer,
     LocalBackend,
@@ -438,6 +439,164 @@ class TestAppMiddleware:
         assert await app.client.call("app.ping", (), {}) == "pong"
         assert server_headers[0].get("x-custom") == "test-value"
         await app.close()
+
+
+class TestHandlerMiddleware:
+    async def test_dispatch_handler_receives_context(self):
+        seen: list[HandlerContext] = []
+
+        class HandlerMw(AppMiddleware):
+            async def dispatch_handler(self, call_next, request, handler_ctx):
+                seen.append(handler_ctx)
+                return await call_next()
+
+        app = App("app", backend=LocalBackend(), middlewares=[HandlerMw()])
+        rpc = app.rpc()
+
+        @rpc.method("ping", validate_types=True)
+        def ping() -> str:
+            return "pong"
+
+        async with app:
+            await rpc.consume()
+            assert await call(app, "app.ping") == "pong"
+
+        assert len(seen) == 1
+        ctx = seen[0]
+        assert isinstance(ctx, HandlerContext)
+        assert ctx.name == "app.ping"
+        assert ctx.request_type == "rpc"
+        assert ctx.queue == "app"
+        assert ctx.validate_args is False
+        assert dict(ctx.options) == {"validate_types": True}
+
+    async def test_dispatch_handler_runs_after_before_handler_hook(self):
+        events: list[str] = []
+
+        class HandlerMw(AppMiddleware):
+            async def dispatch_handler(self, call_next, request, handler_ctx):
+                events.append("middleware:before")
+                result = await call_next()
+                events.append("middleware:after")
+                return result
+
+        app = App("app", backend=LocalBackend(), middlewares=[HandlerMw()])
+        rpc = app.rpc()
+
+        @app.hook.before_handler
+        async def on_before(event):
+            events.append("hook:before")
+
+        @app.hook.after_handler
+        async def on_after(event):
+            events.append("hook:after")
+
+        @rpc.method("ping")
+        def ping() -> str:
+            events.append("handler")
+            return "pong"
+
+        async with app:
+            await rpc.consume()
+            assert await call(app, "app.ping") == "pong"
+
+        assert events == ["hook:before", "middleware:before", "handler", "middleware:after", "hook:after"]
+
+    async def test_dispatch_handler_can_abort_request(self):
+        called = False
+
+        class AuthMw(AppMiddleware):
+            async def dispatch_handler(self, call_next, request, handler_ctx):
+                if handler_ctx.options.get("protected"):
+                    raise RPCError(error_code="Unauthorized", error_message="denied")
+                return await call_next()
+
+        app = App("app", backend=LocalBackend(), middlewares=[AuthMw()])
+        rpc = app.rpc()
+
+        @rpc.method("secret", protected=True)
+        def secret() -> str:
+            nonlocal called
+            called = True
+            return "top-secret"
+
+        async with app:
+            await rpc.consume()
+            with pytest.raises(RPCError) as exc_info:
+                await call(app, "app.secret")
+            assert exc_info.value.error_code == "Unauthorized"
+            assert called is False
+
+    async def test_dispatch_handler_context_is_read_only(self):
+        class MutateMw(AppMiddleware):
+            async def dispatch_handler(self, call_next, request, handler_ctx):
+                with pytest.raises(Exception):
+                    handler_ctx.options["x"] = 1  # type: ignore[index]
+                return await call_next()
+
+        app = App("app", backend=LocalBackend(), middlewares=[MutateMw()])
+        rpc = app.rpc()
+
+        @rpc.method("ping")
+        def ping() -> str:
+            return "pong"
+
+        async with app:
+            await rpc.consume()
+            assert await call(app, "app.ping") == "pong"
+
+    async def test_dispatch_handler_for_task(self):
+        seen: list[HandlerContext] = []
+
+        class HandlerMw(AppMiddleware):
+            async def dispatch_handler(self, call_next, request, handler_ctx):
+                seen.append(handler_ctx)
+                return await call_next()
+
+        app = App("app", backend=LocalBackend(), middlewares=[HandlerMw()])
+        worker = app.worker()
+
+        @worker.task("job", retries=3)
+        def job() -> None:
+            return None
+
+        async with app:
+            await worker.consume()
+            await send(app, "app.job")
+
+        assert len(seen) == 1
+        ctx = seen[0]
+        assert ctx.name == "app.job"
+        assert ctx.request_type == "task"
+        assert ctx.queue == "app"
+        assert dict(ctx.options) == {"retries": 3}
+
+    async def test_dispatch_handler_for_event(self):
+        seen: list[HandlerContext] = []
+
+        class HandlerMw(AppMiddleware):
+            async def dispatch_handler(self, call_next, request, handler_ctx):
+                seen.append(handler_ctx)
+                return await call_next()
+
+        app = App("app", backend=LocalBackend(), middlewares=[HandlerMw()])
+        bus = app.bus()
+
+        @bus.subscribe("user.*", group="analytics")
+        def on_user(user_id: int) -> None:
+            return None
+
+        async with app:
+            await bus.consume()
+            event_queue = bus.event_queue
+            await emit(app, "user.created", user_id=1)
+
+        assert len(seen) == 1
+        ctx = seen[0]
+        assert ctx.name == "user.*"
+        assert ctx.request_type == "event"
+        assert ctx.queue == event_queue
+        assert dict(ctx.options) == {"group": "analytics"}
 
 
 class TestAppTimeoutsRouting:

@@ -23,8 +23,15 @@ from .hooks import (
     MessageDroppedEvent,
     RequestReceivedEvent,
 )
-from .middleware import AppMiddleware, WireMiddleware, apply_middleware, wrap_app_server, wrap_wire_server
-from .models import ErrorInfo, HandlerInfo, Message, QueueOptions, Request, Response
+from .middleware import (
+    AppMiddleware,
+    WireMiddleware,
+    apply_middleware,
+    wrap_app_handler,
+    wrap_app_server,
+    wrap_wire_server,
+)
+from .models import ErrorInfo, HandlerContext, HandlerInfo, Message, QueueOptions, Request, Response
 from .serializer import Serializer
 from .utils import normalize_queue_options, topic_to_regex
 
@@ -304,6 +311,27 @@ class _Server:
             return info.fn(*args, **kwds)
         finally:
             _current_request.reset(token_req)
+
+    def _handler_context(self, info: HandlerInfo) -> HandlerContext:
+        return HandlerContext(
+            name=info.name,
+            request_type=info.request_type,
+            options=info.options,
+            queue=info.queue,
+        )
+
+    async def _call_handler(self, info: HandlerInfo, request: Request) -> Any:
+        handler_ctx = self._handler_context(info)
+
+        async def run_handler() -> Any:
+            return await self._run_handler(info, request)
+
+        handler_call = apply_middleware(
+            self._app_mw,
+            run_handler,
+            lambda mw, n: wrap_app_handler(mw, n, request, handler_ctx),
+        )
+        return await handler_call()
 
     # ------------------------------------------------------------------
     # Request handling
@@ -637,7 +665,7 @@ class RPC(_Server):
                 )
             )
         try:
-            result = await self._run_handler(info, request)
+            result = await self._call_handler(info, request)
         except TimeoutError as exc:
             response = Response(
                 id=request.id,
@@ -1031,7 +1059,7 @@ class Worker(_Server):
                 )
             )
         try:
-            result = await self._run_handler(info, request)
+            result = await self._call_handler(info, request)
         except TimeoutError as exc:
             logger.warning("Task execution timed out: %s", task)
             if self._app.hooks.on_handler_error:
@@ -1414,7 +1442,7 @@ class Bus(_Server):
                 )
             )
         try:
-            result = await self._run_handler(info, request)
+            result = await self._call_handler(info, request)
         except Exception as exc:
             logger.exception("Subscriber handler failed for %s", info.name)
             if self._app.hooks.on_handler_error:

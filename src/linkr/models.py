@@ -75,6 +75,22 @@ class HandlerInfo:
 
 
 @dataclass(frozen=True)
+class HandlerContext:
+    """Read-only handler metadata exposed to handler middleware."""
+
+    name: str
+    request_type: RequestType
+    options: Mapping[str, Any]
+    queue: str | None
+
+    def __post_init__(self) -> None:
+        options = self.options
+        if not isinstance(options, MappingProxyType):
+            options = MappingProxyType(options)
+        object.__setattr__(self, "options", options)
+
+
+@dataclass(frozen=True)
 class HealthStatus:
     """Readiness and health status."""
 
