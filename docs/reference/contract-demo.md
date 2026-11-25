@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 
 from linkr import App, LocalBackend
-from linkr.contracts import describe_app, expose_describe, render_contract_html
+from linkr.contracts import describe_app, expose_describe
 from linkr.middleware.gzip import GzipMiddleware
 
 
@@ -70,7 +70,6 @@ def main() -> None:
     html_doc = contract.to_html()
     with open("contract-demo.html", "w", encoding="utf-8") as f:
         f.write(html_doc)
-    # equivalent: render_contract_html(contract)
     print("Wrote contract-demo.html")
 
 

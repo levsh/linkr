@@ -289,12 +289,12 @@ class TestDescribeHtml:
         assert "<!doctype html>" in html_from_model
         assert "app.ping" in html_from_model
 
-        from linkr.contracts import HtmlContractRenderer, render_contract_html
+        from linkr.contracts import HtmlContractRenderer
 
         html_from_renderer = HtmlContractRenderer(contract).render()
-        html_from_helper = render_contract_html(contract.to_dict(), title="Custom")
+        html_from_dict = HtmlContractRenderer(contract.to_dict(), title="Custom").render()
         assert "app.ping" in html_from_renderer
-        assert "<title>Custom</title>" in html_from_helper
+        assert "<title>Custom</title>" in html_from_dict
 
     async def test_describe_html_filter(self, app: App):
         rpc = app.rpc()

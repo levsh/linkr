@@ -134,7 +134,7 @@ See [Configuration](configuration.md) and [Hooks events](hooks-events.md) for de
 - `describe_app_html(app, *, title=None, **describe_kwargs) -> str` (`linkr.contracts`) — self-contained HTML contract view.
 - `expose_describe(app, name="describe", server: RPC | None = None, **handler_options)` (`linkr.contracts`) — registers an RPC handler on an RPC server that returns `describe_app(app).to_dict()`.
 - `AppContract` (`linkr.contracts`) — `to_dict()`, `to_json()`, `to_html()`.
-- `ContractBuilder(...).build()`, `HtmlContractRenderer(...)`, `render_contract_html(...)` (`linkr.contracts`).
+- `ContractBuilder(...).build()`, `HtmlContractRenderer(...)` (`linkr.contracts`).
 - `App.subscriptions` / `App.methods` / `App.tasks` — aggregated views across servers.
 
 Contract entries include fully qualified call/send targets, queue names, middleware `features`, input/output schema fragments (when available), and `validate_types` flags. Event subscriber entries also include `features`. `Depends[...]` parameters are excluded from public input contracts.

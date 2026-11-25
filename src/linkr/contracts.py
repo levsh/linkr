@@ -205,7 +205,7 @@ class AppContract(BaseModel):
         return json.dumps(self.to_dict(), indent=indent, default=ContractBuilder.json_default)
 
     def to_html(self, *, title: str | None = None) -> str:
-        return render_contract_html(self, title=title)
+        return HtmlContractRenderer(self, title=title).render()
 
 
 class ContractBuilder:
@@ -953,10 +953,6 @@ function filterOps(query) {
   });
 }
 </script>"""
-
-
-def render_contract_html(contract: AppContract | dict[str, Any], *, title: str | None = None) -> str:
-    return HtmlContractRenderer(contract, title=title).render()
 
 
 def describe_app(app: Any, *, include: set[str] | None = None, include_internal: bool = False) -> AppContract:
