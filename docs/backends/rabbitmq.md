@@ -117,6 +117,7 @@ bus = app.bus(options=[RmqQueueOptions(prefetch_count=20)])
 - `durable`, `exclusive`, `auto_delete`, `passive` — queue declare flags (backend/mode defaults apply when `None`).
 - `arguments` — AMQP queue arguments (e.g. `x-max-length`, `x-dead-letter-exchange`, `x-queue-type`).
 - `prefetch_count` — consumer QoS prefetch for that queue/consumer (a dedicated channel may be used for per-queue overrides).
+- `ack_mode` — `"after_reply"` (default), `"after_handler"`, or `"before_handler"`. `after_reply` acknowledges after successful processing and, for RPC, after successful reply publish; for task/event it is equivalent to `after_handler`. `after_handler` acknowledges after successful handler execution. `before_handler` acknowledges before handler execution. If ack/reject fails, the callback logs the error; an unacked message may be redelivered by RabbitMQ after consumer/channel/connection closure.
 - `extra` — reserved for future use.
 
 Notes:

@@ -96,6 +96,7 @@ Method/task `name` must be a local leaf (no `.`). Common handler option: `valida
 - `Message(data: bytes, headers: dict)` — wire envelope
 - `ErrorInfo(error_code, error_message, error_details)`
 - `HandlerInfo` — registered handler metadata
+- `HandlerContext` — read-only handler metadata passed to `AppMiddleware.dispatch_handler` (`name`, `request_type`, `options: Mapping[str, Any]`, `queue`); `options` is exposed as a read-only mapping
 - `HealthStatus(ready: bool, health: bool | None, details: Mapping[str, Any] | None = None)` — frozen readiness/health status; `health` is `None` when `ready` is `False`; `details` is normalized to a read-only mapping with public `connection/queues` diagnostics
 - `QueueOptions` — marker base for backend-specific queue/consumer options
 - `RmqQueueOptions(...)` (`linkr.backends.rmq`) — RabbitMQ queue/consumer options (`durable`, `exclusive`, `auto_delete`, `passive`, `arguments`, `prefetch_count`, `ack_mode`, `extra`). `ack_mode="after_reply"` (default) acknowledges after successful processing and, for RPC, after successful reply publish; for task/event it is equivalent to `after_handler`. `ack_mode="after_handler"` acknowledges after successful handler execution. `ack_mode="before_handler"` acknowledges before handler execution.
@@ -109,7 +110,7 @@ Method/task `name` must be a local leaf (no `.`). Common handler option: `valida
 ## Middleware
 
 - `BaseMiddleware`: `init()`, `close()`
-- `AppMiddleware`: `dispatch_client(call_next, request, *, context) -> Response|None`, `dispatch_server(call_next, request) -> Response|None`
+- `AppMiddleware`: `dispatch_client(call_next, request, *, context) -> Response|None`, `dispatch_server(call_next, request) -> Response|None`, `dispatch_handler(call_next, request, handler_ctx: HandlerContext) -> Any`
 - `WireMiddleware`: `dispatch_client(call_next, request, request_message, *, context) -> Message|None`, `dispatch_server(call_next, request_message) -> (Message,Response)|(None,None)`
 - `linkr.middleware.gzip.GzipMiddleware(min_size=1024)`
 

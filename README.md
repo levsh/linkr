@@ -260,8 +260,13 @@ class LoggingMiddleware(AppMiddleware):
     async def dispatch_server(self, call_next, request: Request) -> Response | None:
         return await call_next()
 
+    async def dispatch_handler(self, call_next, request: Request, handler_ctx):
+        return await call_next()
+
 app = App("orders", backend=LocalBackend(), middlewares=[LoggingMiddleware()])
 ```
+
+`dispatch_handler` wraps the resolved handler call and receives `handler_ctx` (`HandlerContext`) with read-only handler metadata (`name`, `request_type`, `options`, `queue`).
 
 See `docs/` for details on hooks, middleware, dependency injection, validation, serializers, contracts, and backends.
 

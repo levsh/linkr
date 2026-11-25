@@ -43,7 +43,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from linkr import AppMiddleware
-from linkr.models import Request, Response
+from linkr.models import HandlerContext, Request, Response
 
 
 class LoggingMiddleware(AppMiddleware):
@@ -68,11 +68,24 @@ class LoggingMiddleware(AppMiddleware):
         response = await call_next()
         # after dispatch
         return response
+
+    async def dispatch_handler(
+        self,
+        call_next: Callable[[], Awaitable[Any]],
+        request: Request,
+        handler_ctx: HandlerContext,
+    ) -> Any:
+        # before handler execution
+        result = await call_next()
+        # after handler execution
+        return result
 ```
 
 - `dispatch_client`: wraps the client pipeline around backend call; `context` receives call context.
-  - `dispatch_server`: wraps server-side dispatch for the request (only `Request` is available at this layer).
-  - For task/event flows there is no response returned to a remote caller.
+- `dispatch_server`: wraps server-side dispatch for the request (only `Request` is available at this layer).
+- `dispatch_handler`: wraps the resolved handler call after the handler is found and validation passes. It receives `handler_ctx: HandlerContext` (read-only: `name`, `request_type`, `options`, `queue`; `options` is a read-only mapping). Raising an exception aborts handler execution and follows the normal handler error path.
+- For task/event flows there is no response returned to a remote caller.
+- `server_timeout` limits execution of the handler function (`info.fn(...)`) for RPC/task handlers. `dispatch_handler` code before/after `await call_next()` runs outside that timeout.
 
 ## Wire-level middleware
 
