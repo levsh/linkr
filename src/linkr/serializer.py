@@ -97,7 +97,7 @@ class JsonSerializer(Serializer):
             Serialized wire message.
         """
         data = request.model_dump_json().encode()
-        return Message(data=data, headers=self._headers)
+        return Message(data=data, headers=dict(self._headers))
 
     def loads_request(self, message: Message) -> Request:
         """
@@ -122,7 +122,7 @@ class JsonSerializer(Serializer):
             Serialized wire message.
         """
         data = response.model_dump_json().encode()
-        return Message(data=data, headers=self._headers)
+        return Message(data=data, headers=dict(self._headers))
 
     def loads_response(self, message: Message) -> Response:
         """
@@ -206,7 +206,7 @@ class JsonRpcSerializer(Serializer):
             obj["headers"] = dict(request.headers)
 
         payload = json.dumps(obj, separators=(",", ":")).encode()
-        return Message(data=payload, headers=self._headers)
+        return Message(data=payload, headers=dict(self._headers))
 
     def loads_request(self, message: Message) -> Request:
         """
@@ -298,7 +298,7 @@ class JsonRpcSerializer(Serializer):
             obj["headers"] = dict(response.headers)
 
         data = json.dumps(obj, separators=(",", ":")).encode()
-        return Message(data=data, headers=self._headers)
+        return Message(data=data, headers=dict(self._headers))
 
     def loads_response(self, message: Message) -> Response:
         """
