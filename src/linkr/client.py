@@ -178,9 +178,7 @@ class Client:
     ) -> Request:
         queue = self._resolve_queue(method)
         headers: dict[str, Any] = {"queue": queue}
-        server_timeout = _norm_timeout(
-            server_timeout if server_timeout is not None else self._rpc_server_timeout
-        )
+        server_timeout = _norm_timeout(server_timeout if server_timeout is not None else self._rpc_server_timeout)
         ttl = ttl if ttl is not None else self._rpc_ttl
         rttl = rttl if rttl is not None else self._rpc_rttl
         if server_timeout is not None:
@@ -209,9 +207,7 @@ class Client:
     ) -> Request:
         queue = self._resolve_queue(task)
         headers: dict[str, Any] = {"queue": queue}
-        server_timeout = _norm_timeout(
-            server_timeout if server_timeout is not None else self._task_server_timeout
-        )
+        server_timeout = _norm_timeout(server_timeout if server_timeout is not None else self._task_server_timeout)
         ttl = ttl if ttl is not None else self._task_ttl
         if server_timeout is not None:
             headers["server_timeout"] = server_timeout
@@ -256,12 +252,6 @@ class Client:
         serializer: str | None = None,
         context: dict[str, Any] | None = None,
     ) -> Any:
-        ser = self._get_serializer(serializer)
-        request_message = ser.dumps_request(request)
-        request_message.headers["serializer"] = ser.name
-        ttl = request.headers.get("ttl")
-        if ttl is not None:
-            request_message.headers["ttl"] = ttl
         if context is None:
             context = {}
 
@@ -310,47 +300,49 @@ class Client:
                 data=ErrorInfo(error_code=ErrorCode.INTERNAL_ERROR, error_message="middleware returned no response"),
             )
 
-        async def backend_call_and_wait() -> Message:
-            try:
-                future = await self._app.backend.request(
-                    request.headers["queue"],
-                    request_message,
-                    context=context,
+        async def serialize_and_backend() -> Response | None:
+            ser = self._get_serializer(serializer)
+            request_message = ser.dumps_request(request)
+            request_message.headers["serializer"] = ser.name
+            ttl = request.headers.get("ttl")
+            if ttl is not None:
+                request_message.headers["ttl"] = ttl
+
+            async def backend_call_and_wait() -> Message:
+                try:
+                    future = await self._app.backend.request(
+                        request.headers["queue"],
+                        request_message,
+                        context=context,
+                    )
+                except Exception as exc:
+                    await emit_published("error", exc)
+                    raise
+                await emit_published("ok")
+
+                try:
+                    if client_timeout is None:
+                        response_message = await future
+                    else:
+                        response_message = await asyncio.wait_for(future, client_timeout)
+                except TimeoutError as exc:
+                    await emit_response_received(make_timeout_response())
+                    raise RPCError(
+                        error_code=ErrorCode.TIMEOUT,
+                        error_message="Client wait timed out",
+                    ) from exc
+                return response_message
+
+            if not self._wire_mw:
+                response_message: Message | None = await backend_call_and_wait()
+            else:
+                wire_handler = apply_middleware(
+                    self._wire_mw,
+                    backend_call_and_wait,
+                    lambda mw, n: wrap_wire_client(mw, n, request, request_message, context),
                 )
-            except Exception as exc:
-                await emit_published("error", exc)
-                raise
-            await emit_published("ok")
+                response_message = await wire_handler()
 
-            try:
-                if client_timeout is None:
-                    response_message = await future
-                else:
-                    response_message = await asyncio.wait_for(future, client_timeout)
-            except TimeoutError as exc:
-                await emit_response_received(make_timeout_response())
-                raise RPCError(
-                    error_code=ErrorCode.TIMEOUT,
-                    error_message="Client wait timed out",
-                ) from exc
-            return response_message
-
-        if not self._wire_mw and not self._app_mw:
-            response_message = await backend_call_and_wait()
-            resp_ser_name = response_message.headers.get("serializer")
-            resp_ser = self._get_serializer(resp_ser_name) if resp_ser_name else ser
-            response = resp_ser.loads_response(response_message)
-            await emit_response_received(response)
-            return self._unpack_rpc_response(response)
-
-        wire_handler = apply_middleware(
-            self._wire_mw,
-            backend_call_and_wait,
-            lambda mw, n: wrap_wire_client(mw, n, request, request_message, context),
-        )
-
-        async def app_backend() -> Response | None:
-            response_message = await wire_handler()
             if response_message is None:
                 await emit_response_received(make_missing_response())
                 raise RPCError(error_code=ErrorCode.INTERNAL_ERROR, error_message="middleware returned no response")
@@ -358,17 +350,22 @@ class Client:
             resp_ser = self._get_serializer(resp_ser_name) if resp_ser_name else ser
             return resp_ser.loads_response(response_message)
 
-        app_handler = apply_middleware(
-            self._app_mw,
-            app_backend,
-            lambda mw, n: wrap_app_client(mw, n, request, context),
-        )
+        if not self._app_mw:
+            resp = await serialize_and_backend()
+        else:
+            app_handler = apply_middleware(
+                self._app_mw,
+                serialize_and_backend,
+                lambda mw, n: wrap_app_client(mw, n, request, context),
+            )
+            resp = await app_handler()
 
-        resp = await app_handler()
         if resp is None:
             await emit_response_received(make_missing_response())
             raise RPCError(error_code=ErrorCode.INTERNAL_ERROR, error_message="middleware returned no response")
+
         await emit_response_received(resp)
+
         return self._unpack_rpc_response(resp)
 
     async def _invoke_task_request(
@@ -379,12 +376,6 @@ class Client:
         serializer: str | None = None,
         context: dict[str, Any] | None = None,
     ) -> None:
-        ser = self._get_serializer(serializer)
-        request_message = ser.dumps_request(request)
-        request_message.headers["serializer"] = ser.name
-        ttl = request.headers.get("ttl")
-        if ttl is not None:
-            request_message.headers["ttl"] = ttl
         if context is None:
             context = {}
 
@@ -399,49 +390,59 @@ class Client:
                     )
                 )
 
-        async def backend_call() -> None:
-            try:
-                if client_timeout is None:
-                    await self._app.backend.send(
-                        request.headers["queue"],
-                        request_message,
-                        context=context,
-                    )
-                else:
-                    await asyncio.wait_for(
-                        self._app.backend.send(
+        async def serialize_and_backend() -> Response | None:
+            ser = self._get_serializer(serializer)
+            request_message = ser.dumps_request(request)
+            request_message.headers["serializer"] = ser.name
+            ttl = request.headers.get("ttl")
+            if ttl is not None:
+                request_message.headers["ttl"] = ttl
+
+            async def backend_call() -> None:
+                try:
+                    if client_timeout is None:
+                        await self._app.backend.send(
                             request.headers["queue"],
                             request_message,
                             context=context,
-                        ),
-                        client_timeout,
-                    )
-            except TimeoutError as exc:
-                timeout_exc = RequestError(error_message="Task publish timed out")
-                await emit_published("error", timeout_exc)
-                raise timeout_exc from exc
-            except Exception as exc:
-                await emit_published("error", exc)
-                raise
-            await emit_published("ok")
+                        )
+                    else:
+                        await asyncio.wait_for(
+                            self._app.backend.send(
+                                request.headers["queue"],
+                                request_message,
+                                context=context,
+                            ),
+                            client_timeout,
+                        )
+                except TimeoutError as exc:
+                    timeout_exc = RequestError(error_message="Task publish timed out")
+                    await emit_published("error", timeout_exc)
+                    raise timeout_exc from exc
+                except Exception as exc:
+                    await emit_published("error", exc)
+                    raise
+                await emit_published("ok")
 
-        if not self._wire_mw and not self._app_mw:
-            await backend_call()
-            return
+            if not self._wire_mw:
+                await backend_call()
+                return None
 
-        wire_handler = apply_middleware(
-            self._wire_mw,
-            backend_call,
-            lambda mw, n: wrap_wire_client(mw, n, request, request_message, context),
-        )
-
-        async def app_backend() -> Response | None:
+            wire_handler = apply_middleware(
+                self._wire_mw,
+                backend_call,
+                lambda mw, n: wrap_wire_client(mw, n, request, request_message, context),
+            )
             await wire_handler()
             return None
 
+        if not self._app_mw:
+            await serialize_and_backend()
+            return
+
         app_handler = apply_middleware(
             self._app_mw,
-            app_backend,
+            serialize_and_backend,
             lambda mw, n: wrap_app_client(mw, n, request, context),
         )
         await app_handler()
@@ -454,12 +455,6 @@ class Client:
         serializer: str | None = None,
         context: dict[str, Any] | None = None,
     ) -> None:
-        ser = self._get_serializer(serializer)
-        request_message = ser.dumps_request(request)
-        request_message.headers["serializer"] = ser.name
-        ttl = request.headers.get("ttl")
-        if ttl is not None:
-            request_message.headers["ttl"] = ttl
         if context is None:
             context = {}
 
@@ -474,49 +469,59 @@ class Client:
                     )
                 )
 
-        async def backend_call() -> None:
-            try:
-                if client_timeout is None:
-                    await self._app.backend.emit(
-                        request.data["topic"],
-                        request_message,
-                        context=context,
-                    )
-                else:
-                    await asyncio.wait_for(
-                        self._app.backend.emit(
+        async def serialize_and_backend() -> Response | None:
+            ser = self._get_serializer(serializer)
+            request_message = ser.dumps_request(request)
+            request_message.headers["serializer"] = ser.name
+            ttl = request.headers.get("ttl")
+            if ttl is not None:
+                request_message.headers["ttl"] = ttl
+
+            async def backend_call() -> None:
+                try:
+                    if client_timeout is None:
+                        await self._app.backend.emit(
                             request.data["topic"],
                             request_message,
                             context=context,
-                        ),
-                        client_timeout,
-                    )
-            except TimeoutError as exc:
-                timeout_exc = RequestError(error_message="Event publish timed out")
-                await emit_published("error", timeout_exc)
-                raise timeout_exc from exc
-            except Exception as exc:
-                await emit_published("error", exc)
-                raise
-            await emit_published("ok")
+                        )
+                    else:
+                        await asyncio.wait_for(
+                            self._app.backend.emit(
+                                request.data["topic"],
+                                request_message,
+                                context=context,
+                            ),
+                            client_timeout,
+                        )
+                except TimeoutError as exc:
+                    timeout_exc = RequestError(error_message="Event publish timed out")
+                    await emit_published("error", timeout_exc)
+                    raise timeout_exc from exc
+                except Exception as exc:
+                    await emit_published("error", exc)
+                    raise
+                await emit_published("ok")
 
-        if not self._wire_mw and not self._app_mw:
-            await backend_call()
-            return
+            if not self._wire_mw:
+                await backend_call()
+                return None
 
-        wire_handler = apply_middleware(
-            self._wire_mw,
-            backend_call,
-            lambda mw, n: wrap_wire_client(mw, n, request, request_message, context),
-        )
-
-        async def app_backend() -> Response | None:
+            wire_handler = apply_middleware(
+                self._wire_mw,
+                backend_call,
+                lambda mw, n: wrap_wire_client(mw, n, request, request_message, context),
+            )
             await wire_handler()
             return None
 
+        if not self._app_mw:
+            await serialize_and_backend()
+            return
+
         app_handler = apply_middleware(
             self._app_mw,
-            app_backend,
+            serialize_and_backend,
             lambda mw, n: wrap_app_client(mw, n, request, context),
         )
         await app_handler()
