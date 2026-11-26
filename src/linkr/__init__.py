@@ -93,4 +93,4 @@ __all__ = [
 try:
     __version__ = importlib.metadata.version("linkr")
 except importlib.metadata.PackageNotFoundError:
-    __version__ = "0.11.0"
+    __version__ = "0.11.1"
